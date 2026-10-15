@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Mole Counter</title>
+<meta name="description" content="Counts and measures moles on two visits and shows which grew, shrank, appeared or went.">
+<meta name="theme-color" content="#0F3A62">
+
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/favicon-48.png" sizes="48x48" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mole Counter">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">
+    <img src="icons/icon-192.png" alt="">
+    <span>Mole Counter</span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button type="button" role="tab" data-tab="a">Last visit</button>
+    <button type="button" role="tab" data-tab="b">This visit</button>
+    <button type="button" role="tab" data-tab="compare">Compare</button>
+  </nav>
+</header>
+
+<main class="work">
+  <section class="viewer" id="viewer">
+    <canvas id="view"></canvas>
+
+    <div class="empty" id="empty">
+      <button type="button" class="btn primary" id="empty-pick">Choose photo</button>
+      <p id="empty-note">Choose a photo or take one with the camera.</p>
+    </div>
+
+    <div class="toolbar" id="toolbar">
+      <div class="tools" id="tools">
+        <button type="button" class="tool" data-tool="ruler">Ruler</button>
+        <button type="button" class="tool" data-tool="landmark">Landmark</button>
+        <button type="button" class="tool" data-tool="add">Add mole</button>
+        <button type="button" class="tool" data-tool="remove">Remove mole</button>
+      </div>
+      <div class="tools">
+        <button type="button" class="tool" id="undo">Undo</button>
+        <button type="button" class="tool" id="fit">Fit</button>
+      </div>
+    </div>
+
+    <p class="status" id="status"></p>
+  </section>
+
+  <aside class="panel" id="panel">
+    <div id="panel-photo">
+      <h2 id="photo-title">Last visit</h2>
+
+      <section class="step">
+        <h3><span class="num">1</span>Photo</h3>
+        <button type="button" class="btn" id="pick">Choose photo</button>
+        <p class="meta" id="photo-meta"></p>
+      </section>
+
+      <section class="step">
+        <h3><span class="num">2</span>Scale</h3>
+        <div class="seg" id="scale-seg">
+          <button type="button" data-scale="ruler">Ruler</button>
+          <button type="button" data-scale="landmarks">Landmarks</button>
+        </div>
+        <div id="scale-ruler">
+          <p class="hint">Tap two marks on the ruler with the Ruler tool.</p>
+          <label class="field">Distance between the marks (mm)
+            <input id="ruler-mm" type="number" inputmode="decimal" min="0.1" step="0.1">
+          </label>
+        </div>
+        <div id="scale-landmarks">
+          <p class="hint">Landmarks 1 and 2 set the scale.</p>
+          <label class="field">Distance between landmarks 1 and 2 (mm)
+            <input id="lm-mm" type="number" inputmode="decimal" min="1" step="0.5">
+          </label>
+          <p class="hint" id="lm-mm-from"></p>
+        </div>
+        <p class="result" id="scale-result"></p>
+      </section>
+
+      <section class="step">
+        <h3><span class="num">3</span>Landmarks</h3>
+        <p class="hint">Tap fixed points with the Landmark tool, such as ink dots, the nipples or a scar. Tap them in the same order on both photos.</p>
+        <p class="result" id="lm-count"></p>
+        <button type="button" class="btn" id="lm-undo">Remove last landmark</button>
+      </section>
+
+      <section class="step">
+        <h3><span class="num">4</span>Moles</h3>
+        <label class="field"><span>Sensitivity <output id="sens-out"></output></span>
+          <input id="sens" type="range" min="1" max="10" step="1">
+        </label>
+        <div class="row2">
+          <label class="field">Smallest (mm)
+            <input id="min-mm" type="number" inputmode="decimal" min="0.3" step="0.1">
+          </label>
+          <label class="field">Largest (mm)
+            <input id="max-mm" type="number" inputmode="decimal" min="2" step="1">
+          </label>
+        </div>
+        <button type="button" class="btn primary" id="find">Find moles</button>
+        <p class="hint" id="find-hint">Set the scale first since mole sizes are in mm.</p>
+        <p class="result" id="mole-count"></p>
+        <p class="hint">Tap a missed mole with Add mole. Tap a freckle, hair or shadow with Remove mole.</p>
+      </section>
+    </div>
+
+    <div id="panel-compare" hidden>
+      <h2>Compare</h2>
+      <ul class="missing" id="missing"></ul>
+
+      <div id="compare-body">
+        <div class="stats" id="stats"></div>
+        <p class="result" id="align"></p>
+        <p class="result" id="stretch"></p>
+
+        <div class="row2">
+          <label class="field">Match distance (mm)
+            <input id="match-mm" type="number" inputmode="decimal" min="0.5" step="0.5">
+          </label>
+          <label class="field">Growth flag (mm)
+            <input id="growth-mm" type="number" inputmode="decimal" min="0.1" step="0.1">
+          </label>
+        </div>
+        <p class="hint">Set the growth flag above the difference two photos taken minutes apart give.</p>
+
+        <div class="seg" id="cview-seg">
+          <button type="button" data-cview="b">This visit</button>
+          <button type="button" data-cview="a">Last visit</button>
+        </div>
+
+        <div class="table-wrap">
+          <table id="table">
+            <thead>
+              <tr><th>No.</th><th>Status</th><th>Last (mm)</th><th>Now (mm)</th><th>Change (mm)</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="actions">
+          <button type="button" class="btn" id="csv">Export CSV</button>
+          <button type="button" class="btn" id="save-photos">Save marked photos</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<input type="file" id="file" accept="image/*" hidden>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="moles.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

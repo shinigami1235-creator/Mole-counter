@@ -338,10 +338,10 @@
 
   // Landmarks: maps points in `from` onto `to`. Two or three landmarks fit
   // size, rotation and position. Four or more also fit skew.
-  function fitTransform(from, to) {
+  function fitTransform(from, to, similarityOnly) {
     const n = Math.min(from.length, to.length);
     if (n < 2) return null;
-    if (n < 4) {
+    if (n < 4 || similarityOnly) {
       let mfx = 0, mfy = 0, mtx = 0, mty = 0;
       for (let i = 0; i < n; i++) { mfx += from[i][0]; mfy += from[i][1]; mtx += to[i][0]; mty += to[i][1]; }
       mfx /= n; mfy /= n; mtx /= n; mty /= n;
@@ -420,10 +420,112 @@
     return out;
   }
 
+  // Lines this visit up on the last one from the moles themselves, for
+  // photos without landmarks. Every pair of moles on this visit is tried
+  // against every pair on the last visit with a matching distance, and the
+  // fit that lands the most moles within `tol` of a mole wins.
+  // a, b: [x, y] centres in each photo's pixels. scale: expected last-visit
+  // pixels per this-visit pixel, from the two photo scales.
+  function alignByMoles(a, b, scale, tol, opts) {
+    opts = opts || {};
+    const maxTurn = (opts.maxTurnDeg || 60) * Math.PI / 180;
+    const scaleSlack = opts.scaleSlack || 0.12;
+    if (a.length < 3 || b.length < 3) return null;
+
+    // Grid over the last visit's moles for quick nearest lookups.
+    const cell = tol;
+    const grid = new Map();
+    a.forEach((p, i) => {
+      const k = Math.floor(p[0] / cell) + ',' + Math.floor(p[1] / cell);
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push(i);
+    });
+    const nearest = (x, y) => {
+      const cx = Math.floor(x / cell), cy = Math.floor(y / cell);
+      let best = -1, bd = tol;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const list = grid.get((cx + dx) + ',' + (cy + dy));
+          if (!list) continue;
+          for (const i of list) {
+            const d = Math.hypot(a[i][0] - x, a[i][1] - y);
+            if (d < bd) { bd = d; best = i; }
+          }
+        }
+      }
+      return best < 0 ? null : [best, bd];
+    };
+
+    const minSpan = tol * 4;
+    const pairs = (pts) => {
+      const out = [];
+      for (let i = 0; i < pts.length; i++) {
+        for (let j = i + 1; j < pts.length; j++) {
+          const d = Math.hypot(pts[j][0] - pts[i][0], pts[j][1] - pts[i][1]);
+          if (d >= minSpan) out.push([i, j, d]);
+        }
+      }
+      return out;
+    };
+    const pa = pairs(a).sort((p, q) => p[2] - q[2]);
+    // Long pairs pin rotation best. Try at most 150 of them, spread over the list.
+    const allB = pairs(b).sort((p, q) => q[2] - p[2]);
+    const cap = opts.maxPairs || 150;
+    const pb = allB.length <= cap ? allB : Array.from({ length: cap }, (_, k) => allB[Math.floor(k * allB.length / cap)]);
+    const enough = Math.ceil(Math.min(a.length, b.length) * 0.9);
+    const dists = pa.map((p) => p[2]);
+    const lowerBound = (v) => {
+      let lo = 0, hi = dists.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (dists[m] < v) lo = m + 1; else hi = m; }
+      return lo;
+    };
+
+    let best = null;
+    search:
+    for (const [i, j, db] of pb) {
+      const want = db * scale;
+      const start = lowerBound(want * (1 - scaleSlack));
+      for (let q = start; q < pa.length && pa[q][2] <= want * (1 + scaleSlack); q++) {
+        for (const [k, l] of [[pa[q][0], pa[q][1]], [pa[q][1], pa[q][0]]]) {
+          const T = fitTransform([b[i], b[j]], [a[k], a[l]]);
+          if (!T) continue;
+          if (Math.abs(Math.atan2(T[3], T[0])) > maxTurn) continue;
+          let n = 0, err = 0;
+          for (const p of b) {
+            const [x, y] = applyTransform(T, p[0], p[1]);
+            const hit = nearest(x, y);
+            if (hit) { n++; err += hit[1]; }
+          }
+          if (!best || n > best.n || (n === best.n && err < best.err)) best = { n, err, T };
+          if (best.n >= enough) break search;
+        }
+      }
+    }
+    // Two moles always fit, so a fit counts only when enough others agree.
+    const need = Math.max(4, Math.ceil(Math.min(a.length, b.length) * 0.4));
+    if (!best || best.n < need) return null;
+
+    // Refit on every mole the winner lined up.
+    const from = [], to = [];
+    const used = new Set();
+    for (const p of b) {
+      const [x, y] = applyTransform(best.T, p[0], p[1]);
+      const hit = nearest(x, y);
+      if (hit && !used.has(hit[0])) { used.add(hit[0]); from.push(p); to.push(a[hit[0]]); }
+    }
+    const T = fitTransform(from, to, from.length < 6) || best.T;
+    let ss = 0;
+    for (let i = 0; i < from.length; i++) {
+      const q = applyTransform(T, from[i][0], from[i][1]);
+      ss += (q[0] - to[i][0]) ** 2 + (q[1] - to[i][1]) ** 2;
+    }
+    return { T, inliers: from.length, rms: Math.sqrt(ss / from.length) };
+  }
+
   const api = {
     brightness, boxMean, skinBackground, sampleBackground, dropForSensitivity,
     segmentFromSeed, segmentAt, measureMask, convexHull, eqDiameter, detect,
-    fitTransform, applyTransform, invertTransform, matchMoles,
+    fitTransform, applyTransform, invertTransform, matchMoles, alignByMoles,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MoleCore = api;

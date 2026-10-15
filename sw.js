@@ -2,8 +2,9 @@
 //
 // The app files are served network-first so a fix pushed to GitHub Pages
 // reaches the next page load, with the cached copy used when offline.
-// Icons are served cache-first. Bump CACHE_NAME when APP_SHELL changes.
-const CACHE_NAME = 'mole-counter-v1';
+// Icons are served cache-first. Bump CACHE_NAME on every deploy.
+const CACHE_NAME = 'mole-counter-v2';
+const FACE_CACHE = 'mole-counter-face-0.10.18';   // kept across deploys
 const APP_SHELL = [
   './',
   './index.html',
@@ -30,7 +31,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((names) => Promise.all(
-      names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))
+      names.filter((n) => n !== CACHE_NAME && n !== FACE_CACHE).map((n) => caches.delete(n))
     )).then(() => self.clients.claim())
   );
 });
@@ -43,6 +44,21 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(fetch(event.request).catch(() => caches.match(event.request)));
     return;
   }
+  // The face detector's code and model sit at fixed version numbers, so a
+  // cached copy stays valid and face landmarks keep working offline.
+  if (url.hostname === 'cdn.jsdelivr.net' || url.hostname === 'storage.googleapis.com') {
+    event.respondWith(
+      caches.match(event.request).then((cached) => cached || fetch(event.request).then((response) => {
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(FACE_CACHE).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      }))
+    );
+    return;
+  }
+
   if (url.origin !== self.location.origin) return;
 
   if (url.pathname.includes('/icons/')) {

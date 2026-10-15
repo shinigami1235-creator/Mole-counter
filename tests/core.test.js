@@ -75,6 +75,29 @@ const inv = M.invertTransform(T4);
 const rt = M.applyTransform(inv, ...M.applyTransform(T4, 123, 456));
 check('affine round trip', Math.hypot(rt[0] - 123, rt[1] - 456) < 1e-6);
 
+
+// Lining up on the moles alone
+{
+  const r2 = rng(5);
+  const ptsA = []; for (let i = 0; i < 25; i++) ptsA.push([100 + r2() * 2800, 100 + r2() * 2000]);
+  const ang2 = 12 * Math.PI / 180, sc2 = 1.15;
+  const toB = (p) => [ (Math.cos(ang2) * (p[0] - 1500) - Math.sin(ang2) * (p[1] - 1100)) / sc2 + 1400 + (r2() - 0.5) * 3,
+                       (Math.sin(ang2) * (p[0] - 1500) + Math.cos(ang2) * (p[1] - 1100)) / sc2 + 1000 + (r2() - 0.5) * 3 ];
+  let ptsB = ptsA.map(toB);
+  ptsB = ptsB.slice(3);                       // 3 gone
+  for (let i = 0; i < 4; i++) ptsB.push([200 + r2() * 2400, 200 + r2() * 1800]);  // 4 new
+  const t0 = Date.now();
+  const res = M.alignByMoles(ptsA, ptsB, sc2, 30);
+  const ms = Date.now() - t0;
+  check('moles line up without landmarks', res && res.inliers >= 20, res ? res.inliers + ' inliers, rms ' + res.rms.toFixed(1) + ' px, ' + ms + ' ms' : 'none');
+  const back = res && M.applyTransform(res.T, ...toB(ptsA[10]));
+  check('mapped point lands on its mole', back && Math.hypot(back[0] - ptsA[10][0], back[1] - ptsA[10][1]) < 6);
+  const many = []; for (let i = 0; i < 60; i++) many.push([r2() * 3000, r2() * 2200]);
+  const t1 = Date.now(); M.alignByMoles(many, many.map(toB), sc2, 30);
+  check('60 moles align in under 2 s', Date.now() - t1 < 2000, (Date.now() - t1) + ' ms');
+  check('too few moles returns nothing', M.alignByMoles(ptsA.slice(0, 2), ptsB, 1, 30) === null);
+}
+
 // Speed at full working size
 const big = makeSkin(3000, 2250, 8, truth.map((m) => Object.assign({}, m, { x: m.x * 2.5, y: m.y * 2.5 })));
 t0 = Date.now();

@@ -12,6 +12,27 @@ const HANDLE_HIT_PX = 24;       // screen pixels around a ruler mark or landmark
 const MOLE_HIT_PX = 16;
 const OVER_MM = 6;              // the D in ABCDE
 
+// Face landmarks come from MediaPipe, the same build Cygnus Measure uses.
+const MP_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
+const MP_WASM = MP_URL + '/wasm';
+const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+// Points that hold still through expressions, in landmark order. The
+// patient's right is on the left of a front photo.
+const FACE_POINTS = [
+  [133, 'Right eye, inner corner'],
+  [362, 'Left eye, inner corner'],
+  [33, 'Right eye, outer corner'],
+  [263, 'Left eye, outer corner'],
+  [168, 'Between the eyes'],
+  [2, 'Under the nose'],
+];
+// Each photo is read in several framings and each point is the median, as
+// in Cygnus Measure, since the mesh shifts with the crop.
+const FACE_FRAMINGS = [
+  [0, 0, 0, 0], [0.15, 0.15, 0.15, 0.15], [-0.08, -0.08, -0.08, -0.08], [-0.06, 0, 0.06, 0], [0.06, 0, -0.06, 0],
+];
+const FACE_DETECT_MAX = 1600;   // longest side handed to the detector
+
 const COLORS = {
   mark: '#E0B45A',
   landmark: '#4FD1E8',
@@ -35,7 +56,7 @@ function newPhoto(key) {
     name: '', bitmap: null, W: 0, H: 0,
     ws: 1, ww: 0, wh: 0, v: null,
     scaleMode: 'ruler', ruler: [], rulerMm: 10,
-    landmarks: [], lmMm: null,
+    landmarks: [], lmMm: null, faceLandmarks: false, faceBusy: false,
     moles: [], history: [], view: null,
   };
 }
@@ -138,34 +159,43 @@ function buildCompare() {
   for (const [p, name] of [[A, 'last visit'], [B, 'this visit']]) {
     if (!p.bitmap) { missing.push('Choose the ' + name + ' photo.'); continue; }
     if (!pxPerMm(p)) missing.push('Set the scale on the ' + name + ' photo.');
-    if (p.landmarks.length < 2) missing.push('Place at least 2 landmarks on the ' + name + ' photo.');
     if (!p.moles.length) missing.push('Find the moles on the ' + name + ' photo.');
   }
-  if (A.bitmap && B.bitmap && A.landmarks.length >= 2 && B.landmarks.length >= 2 &&
-      A.landmarks.length !== B.landmarks.length) {
+  const useLandmarks = A.landmarks.length >= 2 && B.landmarks.length >= 2;
+  if (useLandmarks && A.landmarks.length !== B.landmarks.length) {
     missing.push('Place the same number of landmarks on both photos. The last visit has ' +
       A.landmarks.length + ' and this visit has ' + B.landmarks.length + '.');
   }
   if (missing.length) return { missing };
 
   const sA = pxPerMm(A), sB = pxPerMm(B);
-  const n = A.landmarks.length;
-  const T = C.fitTransform(B.landmarks, A.landmarks);   // this visit -> last visit pixels
-  const Tinv = T && C.invertTransform(T);
-  if (!T || !Tinv) return { missing: ['Landmarks 1 and 2 sit on the same spot. Move one of them.'] };
-
-  let residualMm = null;
-  if (n >= 3) {
-    let ss = 0;
-    for (let i = 0; i < n; i++) {
-      const q = C.applyTransform(T, B.landmarks[i][0], B.landmarks[i][1]);
-      ss += dist(q, A.landmarks[i]) ** 2;
+  let T, residualMm = null, n = 0, byMoles = null;
+  if (useLandmarks) {
+    n = A.landmarks.length;
+    T = C.fitTransform(B.landmarks, A.landmarks);   // this visit -> last visit pixels
+    if (!T || !C.invertTransform(T)) return { missing: ['Landmarks 1 and 2 sit on the same spot. Move one of them.'] };
+    if (n >= 3) {
+      let ss = 0;
+      for (let i = 0; i < n; i++) {
+        const q = C.applyTransform(T, B.landmarks[i][0], B.landmarks[i][1]);
+        ss += dist(q, A.landmarks[i]) ** 2;
+      }
+      residualMm = Math.sqrt(ss / n) / sA;
     }
-    residualMm = Math.sqrt(ss / n) / sA;
+  } else {
+    // No landmarks on one photo: line the photos up on the moles themselves.
+    const res = C.alignByMoles(A.moles.map((m) => [m.cx, m.cy]), B.moles.map((m) => [m.cx, m.cy]),
+      sA / sB, state.settings.matchMm * sA);
+    if (!res) {
+      return { missing: ['The moles on the two photos could not be lined up. Place at least 2 landmarks on both photos in the same order.'] };
+    }
+    T = res.T;
+    byMoles = { inliers: res.inliers, rmsMm: res.rms / sA };
   }
+  const Tinv = C.invertTransform(T);
 
   let stretch = null;
-  if (A.scaleMode === 'ruler' && B.scaleMode === 'ruler') {
+  if (useLandmarks && A.scaleMode === 'ruler' && B.scaleMode === 'ruler') {
     const dA = dist(A.landmarks[0], A.landmarks[1]) / sA;
     const dB = dist(B.landmarks[0], B.landmarks[1]) / sB;
     stretch = { dA, dB, pct: (dB / dA - 1) * 100 };
@@ -224,21 +254,21 @@ function buildCompare() {
     if (r.b) { labelOfB.set(r.b.id, r.label); statusOfB.set(r.b.id, r); }
     if (r.a) statusOfA.set(r.a.id, r);
   }
-  return { rows, stats, n, residualMm, stretch, T, Tinv, labelOfB, statusOfA, statusOfB, numbers };
+  return { rows, stats, n, residualMm, byMoles, stretch, T, Tinv, labelOfB, statusOfA, statusOfB, numbers };
 }
 
 // ---------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------
 function pushHistory(p) {
-  p.history.push({ ruler: p.ruler.map((q) => q.slice()), landmarks: p.landmarks.map((q) => q.slice()), moles: p.moles.slice() });
+  p.history.push({ ruler: p.ruler.map((q) => q.slice()), landmarks: p.landmarks.map((q) => q.slice()), moles: p.moles.slice(), face: p.faceLandmarks });
   if (p.history.length > 60) p.history.shift();
 }
 function undo() {
   const p = activePhoto();
   if (!p || !p.history.length) return;
   const h = p.history.pop();
-  p.ruler = h.ruler; p.landmarks = h.landmarks; p.moles = h.moles;
+  p.ruler = h.ruler; p.landmarks = h.landmarks; p.moles = h.moles; p.faceLandmarks = h.face;
   changed();
 }
 
@@ -286,7 +316,7 @@ async function loadPhoto(file) {
   }
   Object.assign(p, {
     name: file.name, bitmap: bmp, W: bmp.width, H: bmp.height,
-    ruler: [], landmarks: [], moles: [], history: [], view: null,
+    ruler: [], landmarks: [], moles: [], history: [], view: null, faceLandmarks: false,
   });
   p.ws = Math.min(1, WORK_MAX / Math.max(p.W, p.H));
   p.ww = Math.round(p.W * p.ws);
@@ -299,6 +329,92 @@ async function loadPhoto(file) {
   fitView(p);
   if (!state.tool) setTool(p.scaleMode === 'ruler' ? 'ruler' : 'landmark');
   changed();
+  findFaceLandmarks(p, true);
+}
+
+// ---------------------------------------------------------------------
+// Face landmarks
+// ---------------------------------------------------------------------
+let faceDetector = null, faceDetectorFail = null;
+
+async function loadFaceDetector() {
+  if (faceDetector) return faceDetector;
+  if (faceDetectorFail) throw faceDetectorFail;
+  try {
+    const vision = await import(MP_URL);
+    const files = await vision.FilesetResolver.forVisionTasks(MP_WASM);
+    const opts = { baseOptions: { modelAssetPath: MP_MODEL, delegate: 'GPU' }, runningMode: 'IMAGE', numFaces: 1 };
+    try {
+      faceDetector = await vision.FaceLandmarker.createFromOptions(files, opts);
+    } catch (e) {
+      opts.baseOptions.delegate = 'CPU';
+      faceDetector = await vision.FaceLandmarker.createFromOptions(files, opts);
+    }
+    return faceDetector;
+  } catch (e) {
+    faceDetectorFail = e;
+    throw e;
+  }
+}
+
+// Median position of each face point over the framings, in photo pixels,
+// or null when fewer than 3 framings find a face.
+function readFace(det, p) {
+  const k = Math.min(1, FACE_DETECT_MAX / Math.max(p.W, p.H));
+  const w = Math.round(p.W * k), h = Math.round(p.H * k);
+  const runs = [];
+  for (const [l, t, r, b] of FACE_FRAMINGS) {
+    const ox = Math.round(l * w), oy = Math.round(t * h);
+    const cw = Math.round(w + ox + r * w), ch = Math.round(h + oy + b * h);
+    const cv = document.createElement('canvas');
+    cv.width = cw; cv.height = ch;
+    const g = cv.getContext('2d');
+    g.fillStyle = '#000';
+    g.fillRect(0, 0, cw, ch);
+    g.drawImage(p.bitmap, ox, oy, w, h);
+    let lms = null;
+    try { lms = det.detect(cv)?.faceLandmarks?.[0]; } catch (e) { lms = null; }
+    if (lms && lms.length >= 468) {
+      runs.push(FACE_POINTS.map(([i]) => [(lms[i].x * cw - ox) / k, (lms[i].y * ch - oy) / k]));
+    }
+  }
+  if (runs.length < 3) return null;
+  const median = (v) => { const q = v.slice().sort((x, y) => x - y); return q[q.length >> 1]; };
+  return FACE_POINTS.map((_, j) => [median(runs.map((r) => r[j][0])), median(runs.map((r) => r[j][1]))]);
+}
+
+// Places the face landmarks. On loading a photo it runs quietly and only
+// when the photo has no landmarks yet; the button replaces them.
+async function findFaceLandmarks(p, quiet) {
+  if (!p.bitmap || p.faceBusy) return;
+  if (quiet && p.landmarks.length) return;
+  const bitmap = p.bitmap;
+  p.faceBusy = true;
+  renderPanel();
+  let pts = null;
+  try {
+    const det = await loadFaceDetector();
+    await new Promise((r) => setTimeout(r, 0));
+    if (p.bitmap !== bitmap) return;
+    pts = readFace(det, p);
+  } catch (e) {
+    if (!quiet) showToast('Face landmarks need an internet connection the first time.');
+    return;
+  } finally {
+    p.faceBusy = false;
+    renderPanel();
+  }
+  if (p.bitmap !== bitmap) return;
+  if (!pts) {
+    if (!quiet) showToast('No face found in this photo.');
+    return;
+  }
+  if (quiet && p.landmarks.length) return;
+  pushHistory(p);
+  p.landmarks = pts;
+  p.faceLandmarks = true;
+  changed();
+  if (activePhoto() === p) showToast('Face found. Landmarks 1 to 6 are on the eye corners, between the eyes and under the nose.');
 }
 
 function toMole(p, m, manual) {
@@ -705,6 +821,7 @@ function onTap(x, y) {
     if (p.landmarks.length >= MAX_LANDMARKS) { showToast(MAX_LANDMARKS + ' landmarks is the limit.'); return; }
     pushHistory(p);
     p.landmarks.push([ix, iy]);
+    p.faceLandmarks = false;
     changed();
     return;
   }
@@ -782,6 +899,7 @@ function statusText() {
     case 'ruler':
       return p.ruler.length < 2 ? 'Tap ruler mark ' + (p.ruler.length + 1) + '.' : 'Drag a mark to move it.';
     case 'landmark': {
+      if (p.faceLandmarks) return 'Drag a landmark to move it.';
       const n = p.landmarks.length + 1;
       if (p === B && A.landmarks.length >= n) return 'Tap landmark ' + n + ' on the same spot as on the last visit photo.';
       return 'Tap landmark ' + n + '. Drag a landmark to move it.';
@@ -841,7 +959,11 @@ function renderPhotoPanel() {
   else dom.scaleResult.textContent = p.landmarks.length < 2 ? 'Place landmarks 1 and 2.' : 'Type the distance between landmarks 1 and 2.';
 
   const n = p.landmarks.length;
-  dom.lmCount.textContent = !p.bitmap ? '' : n === 0 ? 'No landmarks yet.' : n === 1 ? '1 landmark.' : n + ' landmarks.';
+  dom.lmCount.textContent = !p.bitmap ? '' : p.faceBusy ? 'Looking for a face.' :
+    n === 0 ? 'No landmarks yet.' : n === 1 ? '1 landmark.' :
+    n + (p.faceLandmarks && n === FACE_POINTS.length ? ' landmarks from the face.' : ' landmarks.');
+  dom.faceFind.disabled = !p.bitmap || p.faceBusy;
+  dom.faceFind.textContent = p.faceBusy ? 'Finding' : 'Find face landmarks';
   if (p === B && A.landmarks.length && n !== A.landmarks.length && p.bitmap) {
     dom.lmCount.textContent += ' The last visit photo has ' + A.landmarks.length + '.';
   }
@@ -899,7 +1021,8 @@ function renderCompare() {
     dom.stats.appendChild(d);
   }
 
-  if (res.residualMm == null) dom.align.textContent = 'Add a third landmark on both photos to check the alignment.';
+  if (res.byMoles) dom.align.textContent = 'Lined up on ' + res.byMoles.inliers + ' matching moles, within ' + fmt(res.byMoles.rmsMm) + ' mm.';
+  else if (res.residualMm == null) dom.align.textContent = 'Add a third landmark on both photos to check the alignment.';
   else if (res.residualMm > st.matchMm / 2) dom.align.textContent = 'Landmarks are off by ' + fmt(res.residualMm) + ' mm. Check they were tapped in the same order on both photos.';
   else dom.align.textContent = 'Landmarks agree within ' + fmt(res.residualMm) + ' mm.';
   dom.align.classList.toggle('warn', res.residualMm != null && res.residualMm > st.matchMm / 2);
@@ -1068,7 +1191,7 @@ function numberInput(el, fn) {
 function wire() {
   const ids = ['view', 'empty', 'empty-pick', 'empty-note', 'toolbar', 'tools', 'undo', 'fit', 'status',
     'panel-photo', 'panel-compare', 'photo-title', 'pick', 'photo-meta', 'scale-seg', 'scale-ruler',
-    'scale-landmarks', 'ruler-mm', 'lm-mm', 'lm-mm-from', 'scale-result', 'lm-count', 'lm-undo', 'sens',
+    'scale-landmarks', 'ruler-mm', 'lm-mm', 'lm-mm-from', 'scale-result', 'lm-count', 'lm-undo', 'face-find', 'sens',
     'sens-out', 'min-mm', 'max-mm', 'find', 'find-hint', 'mole-count', 'missing', 'compare-body', 'stats',
     'align', 'stretch', 'panel', 'match-mm', 'growth-mm', 'cview-seg', 'table', 'csv', 'save-photos', 'file', 'toast'];
   for (const id of ids) dom[id.replace(/-(\w)/g, (m, c) => c.toUpperCase())] = $(id);
@@ -1106,6 +1229,7 @@ function wire() {
   }
   numberInput(dom.rulerMm, (v) => { activePhoto().rulerMm = v; state.version++; renderPanel(); requestDraw(); });
   numberInput(dom.lmMm, (v) => { activePhoto().lmMm = v > 0 ? v : null; state.version++; renderPanel(); requestDraw(); });
+  dom.faceFind.addEventListener('click', () => findFaceLandmarks(activePhoto(), false));
   dom.lmUndo.addEventListener('click', () => {
     const p = activePhoto();
     if (!p.landmarks.length) return;

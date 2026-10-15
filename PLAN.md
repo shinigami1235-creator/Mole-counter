@@ -54,7 +54,7 @@ Face, neck front, neck back, chest, abdomen, upper back, lower back, left and ri
 
 1. **Test run on one segment.** Built. Two photos picked from the gallery or taken with the phone's own camera. Set the scale, find the moles, edit the marks, line up the photos by landmarks and read the comparison.
 2. **Visits.** The Camera Overlay ghost camera as a setting, patients and visits saved on the device, and the body map with segments.
-3. **Automatic lining up.** The program lines photos up from skin features by itself, with the landmark clicks kept as the fallback. ABCDE flags and a PDF report per visit.
+3. **Automatic lining up.** Face landmarks and lining up on the moles are built. ABCDE flags and a PDF report per visit are still to come.
 4. **Full body.** A standard set of poses covering the whole body, with each segment photo placed on the body map.
 
 ## Stack

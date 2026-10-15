@@ -8,10 +8,10 @@ Do these four steps on the Last visit tab, then again on the This visit tab.
 
 1. **Photo.** Choose the photo. On a phone or iPad the same button can take one with the camera.
 2. **Scale.** Pick Ruler and tap two marks on a ruler lying on the skin, then type the distance between them. Or pick Landmarks and type the distance between landmarks 1 and 2. This visit takes that distance from the last visit unless you type your own.
-3. **Landmarks.** Tap at least two fixed points with the Landmark tool, such as ink dots, the nipples or a scar. Tap them in the same order on both photos. A third landmark lets the program check the alignment.
+3. **Landmarks.** A face photo gets 6 landmarks as soon as it loads: both inner eye corners, both outer eye corners, between the eyes and under the nose. Other segments need none since Compare lines the photos up on the moles themselves when a photo has no landmarks. To add your own, tap fixed points with the Landmark tool, such as ink dots, the nipples or a scar, in the same order on both photos. A third landmark lets the program check the alignment.
 4. **Moles.** Press Find moles. Remove freckles, hairs and shadows with Remove mole and tap missed moles with Add mole. A spot under a landmark is skipped.
 
-The Compare tab lines this visit up on the last one through the landmarks and pairs each mole with the nearest one within the match distance. Every mole is listed as Same, Grown, Shrunk, New, Gone or Not in frame, with its longest diameter at both visits. Any mole over 6 mm is flagged. Tap a row to zoom to that mole.
+The Compare tab lines this visit up on the last one through the landmarks, or through the moles when there are none, and pairs each mole with the nearest one within the match distance. Every mole is listed as Same, Grown, Shrunk, New, Gone or Not in frame, with its longest diameter at both visits. Any mole over 6 mm is flagged. Tap a row to zoom to that mole.
 
 Export CSV saves the table. Save marked photos saves both photos with the numbered marks.
 
@@ -35,7 +35,7 @@ There is nothing to build. Serve the folder over HTTPS (GitHub Pages works) and 
 
 - `index.html`, `styles.css`, `app.js`: the app
 - `moles.js`: finding, measuring and matching moles, shared with the tests
-- `sw.js`, `manifest.json`: offline use and installing it to the home screen
+- `sw.js`, `manifest.json`: offline use and installing it to the home screen. The face detector (MediaPipe 0.10.18, the build Cygnus Measure uses) downloads from jsDelivr and Google the first time and is kept for offline use after that.
 - `icons/`: Cygnus Solutions icons from Camera Overlay
 - `tests/`: `node tests/core.test.js` checks the detector on made-up skin with moles of known size. `tests/sample` holds two made-up photos to try the app with, made by `python tests/make_photos.py tests/sample`. `node tests/flow.test.js` runs both visits through the app in Chromium with a server on port 8765.
 - `PLAN.md`: the build order up to full body

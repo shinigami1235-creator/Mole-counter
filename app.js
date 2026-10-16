@@ -6,7 +6,7 @@
 
 const C = window.MoleCore;
 const WORK_MAX = 3000;          // longest side of the copy the detector reads
-const LS_KEY = 'molecounter.settings.v1';
+const LS_KEY = 'molecounter.settings.v2';
 const MAX_LANDMARKS = 12;
 const HANDLE_HIT_PX = 24;       // screen pixels around a ruler mark or landmark that grab it
 const MOLE_HIT_PX = 16;
@@ -40,12 +40,12 @@ const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segment
 const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
   152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
 const FACE_HOLES = [
-  [[33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246], 1.55],          // right eye
-  [[263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466], 1.55],       // left eye
-  [[46, 53, 52, 65, 55, 107, 66, 105, 63, 70], 1.3],                                                // right brow
-  [[276, 283, 282, 295, 285, 336, 296, 334, 293, 300], 1.3],                                        // left brow
-  [[61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185], 1.15], // lips
-  [[98, 97, 2, 326, 327, 294, 278, 344, 440, 275, 4, 45, 220, 115, 48, 64], 1.1],                 // nose base and nostrils
+  [[33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246], 1.3],           // right eye
+  [[263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466], 1.3],        // left eye
+  [[46, 53, 52, 65, 55, 107, 66, 105, 63, 70], 1.1],                                                // right brow
+  [[276, 283, 282, 295, 285, 336, 296, 334, 293, 300], 1.1],                                        // left brow
+  [[61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185], 1.05], // lips
+  [[48, 64, 98, 97, 2, 326, 327, 294, 278], 1.0],                                                   // nostrils
 ];
 // Visible iris width in adults, the usual stand-in for a ruler on a face.
 const IRIS_MM = 11.7;
@@ -92,7 +92,7 @@ const state = {
   selected: null,       // compare row key, or a mole id on a photo tab
   brush: 'add',         // area brush: add or erase
   version: 0,
-  settings: { sensitivity: 7, minMm: 1, maxMm: 15, matchMm: 3, growthMm: 1 },
+  settings: { sensitivity: 7, minMm: 0.7, maxMm: 15, matchMm: 3, growthMm: 1 },
   photos: { a: newPhoto('a'), b: newPhoto('b') },
 };
 const A = state.photos.a, B = state.photos.b;
@@ -161,6 +161,29 @@ function moleMm(p, m) {
   return s ? { d: m.feret / s, area: m.area / (s * s) } : null;
 }
 
+// Maps this visit's pixels onto the last visit's: through the landmarks
+// when both photos have the same number, otherwise through the moles.
+function alignVisits() {
+  const sA = pxPerMm(A), sB = pxPerMm(B);
+  if (!sA || !sB) return { error: 'Set the scale on both photos.' };
+  if (A.landmarks.length >= 2 && B.landmarks.length >= 2 && A.landmarks.length === B.landmarks.length) {
+    const n = A.landmarks.length;
+    const T = C.fitTransform(B.landmarks, A.landmarks);
+    if (!T || !C.invertTransform(T)) return { error: 'Landmarks 1 and 2 sit on the same spot. Move one of them.' };
+    let residualMm = null;
+    if (n >= 3) {
+      let ss = 0;
+      for (let i = 0; i < n; i++) ss += dist(C.applyTransform(T, B.landmarks[i][0], B.landmarks[i][1]), A.landmarks[i]) ** 2;
+      residualMm = Math.sqrt(ss / n) / sA;
+    }
+    return { T, n, residualMm, byMoles: null };
+  }
+  const res = C.alignByMoles(A.moles.map((m) => [m.cx, m.cy]), B.moles.map((m) => [m.cx, m.cy]),
+    sA / sB, state.settings.matchMm * sA, { scaleSlack: scaleSlack() });
+  if (!res) return { error: 'The moles on the two photos could not be lined up. Place at least 2 landmarks on both photos in the same order.' };
+  return { T: res.T, n: 0, residualMm: null, byMoles: { inliers: res.inliers, rmsMm: res.rms / sA } };
+}
+
 // How far apart the two photo scales may be when lining up on moles. A
 // rough estimate can be far off, an iris estimate a little.
 function scaleSlack() {
@@ -207,29 +230,9 @@ function buildCompare() {
 
   const sA = pxPerMm(A);
   let sB = pxPerMm(B);
-  let T, residualMm = null, n = 0, byMoles = null;
-  if (useLandmarks) {
-    n = A.landmarks.length;
-    T = C.fitTransform(B.landmarks, A.landmarks);   // this visit -> last visit pixels
-    if (!T || !C.invertTransform(T)) return { missing: ['Landmarks 1 and 2 sit on the same spot. Move one of them.'] };
-    if (n >= 3) {
-      let ss = 0;
-      for (let i = 0; i < n; i++) {
-        const q = C.applyTransform(T, B.landmarks[i][0], B.landmarks[i][1]);
-        ss += dist(q, A.landmarks[i]) ** 2;
-      }
-      residualMm = Math.sqrt(ss / n) / sA;
-    }
-  } else {
-    // No landmarks on one photo: line the photos up on the moles themselves.
-    const res = C.alignByMoles(A.moles.map((m) => [m.cx, m.cy]), B.moles.map((m) => [m.cx, m.cy]),
-      sA / sB, state.settings.matchMm * sA, { scaleSlack: scaleSlack() });
-    if (!res) {
-      return { missing: ['The moles on the two photos could not be lined up. Place at least 2 landmarks on both photos in the same order.'] };
-    }
-    T = res.T;
-    byMoles = { inliers: res.inliers, rmsMm: res.rms / sA };
-  }
+  const al = alignVisits();
+  if (al.error) return { missing: [al.error] };
+  const { T, residualMm, n, byMoles } = al;
   const Tinv = C.invertTransform(T);
 
   // An estimated scale on this visit is replaced by the last visit's scale
@@ -363,7 +366,7 @@ async function loadPhoto(file) {
   }
   Object.assign(p, {
     name: file.name, bitmap: bmp, W: bmp.width, H: bmp.height,
-    ruler: [], landmarks: [], moles: [], history: [], view: null, viewTouched: false,
+    ruler: [], landmarks: [], moles: [], history: [], view: null, viewTouched: false, guidedCount: 0,
     faceLandmarks: false, irisPx: null, faceMesh: null, skinArea: null,
     area: null, areaSource: '', areaEdited: false, areaOverlay: null,
   });
@@ -467,11 +470,13 @@ function zoomToArea(p) {
   p.view = { s, tx: viewer.w / 2 - (x0 + x1) / 2 * s, ty: viewer.h / 2 - (y0 + y1) / 2 * s };
 }
 
-// Dimmed copy of everything outside the area, drawn over the photo.
+// Dims what lies outside the area's outer edge. The eyes, brows, lips and
+// nostrils inside it stay clear on screen while still being skipped.
 function areaOverlay(p) {
   if (!p.area) return null;
   if (p.areaOverlay) return p.areaOverlay;
-  const { w, h, data } = p.area;
+  const { w, h } = p.area;
+  const data = C.fillHoles(p.area.data, w, h);
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   const g = cv.getContext('2d');
@@ -479,7 +484,7 @@ function areaOverlay(p) {
   for (let k = 0; k < w * h; k++) {
     if (data[k]) continue;
     const j = k * 4;
-    img.data[j] = 8; img.data[j + 1] = 14; img.data[j + 2] = 22; img.data[j + 3] = 165;
+    img.data[j] = 8; img.data[j + 1] = 14; img.data[j + 2] = 22; img.data[j + 3] = 120;
   }
   g.putImageData(img, 0, 0);
   p.areaOverlay = cv;
@@ -668,6 +673,7 @@ async function analysePhoto(p, onLoad) {
   if (!p.areaEdited) trimToArea(p);
   if (onLoad && !p.viewTouched) zoomToArea(p);
   changed();
+  if (onLoad && !p.moles.length && pxPerMm(p)) await findMoles(p);
   if (activePhoto() !== p) return;
   if (mesh) showToast('Face found. The area, landmarks and scale are set from it.');
   else if (offline && !onLoad) showToast('The face finder needs an internet connection the first time.');
@@ -684,13 +690,14 @@ function toMole(p, m, manual) {
     fa: [m.feretA[0] * k, m.feretA[1] * k],
     fb: [m.feretB[0] * k, m.feretB[1] * k],
     mask: m.mask, ws: p.ws,
+    contrast: m.contrast || 0,
     manual: !!manual,
     outlines: {},
   };
 }
 
-async function findMoles() {
-  const p = activePhoto();
+async function findMoles(target) {
+  const p = target && target.key ? target : activePhoto();
   const s = p && pxPerMm(p);
   if (!s) return;
   dom.find.textContent = 'Finding';
@@ -708,13 +715,46 @@ async function findMoles() {
       .filter((m) => !onLandmark(m))
       .filter((m) => !manual.some((q) => dist([q.cx, q.cy], [m.cx, m.cy]) < Math.max(q.feret, m.feret) / 2));
     p.moles = manual.concat(auto);
-    p.reviewIndex = -1;
+    p.guidedCount = p === B ? findAtLastSpots(p) : 0;
   } finally {
     dom.find.textContent = 'Find moles';
     dom.find.disabled = false;
   }
   if (state.tool === 'ruler' || state.tool === 'landmark' || state.tool === 'area') state.tool = null;
   changed();
+}
+
+// Looks again at every spot where the last visit had a mole and this
+// visit has none, since a faint mole the doctor added by hand last time
+// can sit under the detector's threshold. Returns how many it found.
+function findAtLastSpots(p) {
+  if (p !== B || !A.moles.length) return 0;
+  const al = alignVisits();
+  if (al.error) return 0;
+  const Tinv = C.invertTransform(al.T);
+  const sB = pxPerMm(A) / Math.sqrt(Math.abs(al.T[0] * al.T[4] - al.T[1] * al.T[3]));
+  const tol = state.settings.matchMm * sB;
+  let added = 0;
+  for (const a of A.moles) {
+    const [x, y] = C.applyTransform(Tinv, a.cx, a.cy);
+    if (x < 0 || y < 0 || x >= p.W || y >= p.H || !inArea(p, x, y)) continue;
+    if (p.moles.some((m) => Math.hypot(m.cx - x, m.cy - y) < tol)) continue;
+    const lastMm = a.feret / pxPerMm(A);
+    // At least 8% darker than the skin and close to the old mole's contrast,
+    // so plain mottled skin where a mole has gone is left alone.
+    const m = C.segmentAt(p.v, p.ww, p.wh, x * p.ws, y * p.ws, {
+      pxPerMm: sB * p.ws, maxMm: Math.max(4, lastMm * 2 + 2), searchMm: Math.min(state.settings.matchMm / 2, 1.5),
+      minContrast: Math.max(0.08, a.contrast * 0.4),
+    });
+    if (!m) continue;
+    const mole = toMole(p, m, false);
+    const nowMm = mole.feret / sB;
+    if (Math.hypot(mole.cx - x, mole.cy - y) > tol || nowMm < lastMm * 0.4 || nowMm > lastMm * 2.5 + 1) continue;
+    mole.guided = true;
+    p.moles.push(mole);
+    added++;
+  }
+  return added;
 }
 
 // Steps through the moles in number order, zoomed in on each one.
@@ -1346,7 +1386,8 @@ function renderPhotoPanel() {
   dom.find.disabled = !s;
   const auto = p.moles.filter((m) => !m.manual).length, manual = p.moles.length - auto;
   dom.moleCount.textContent = !p.moles.length ? '' :
-    p.moles.length + (p.moles.length === 1 ? ' mole' : ' moles') + (manual ? ', ' + manual + ' added by hand.' : '.');
+    p.moles.length + (p.moles.length === 1 ? ' mole' : ' moles') + (manual ? ', ' + manual + ' added by hand' : '') +
+    (p.guidedCount ? ', ' + p.guidedCount + ' found again where the last visit had one' : '') + '.';
   const order = orderedMoles(p);
   const at = order.findIndex((m) => m.id === state.selected);
   dom.review.hidden = !p.moles.length;
@@ -1641,7 +1682,7 @@ function wire() {
   dom.sens.addEventListener('input', () => { state.settings.sensitivity = Number(dom.sens.value); saveSettings(); renderPanel(); });
   numberInput(dom.minMm, (v) => { if (v > 0) { state.settings.minMm = v; saveSettings(); } });
   numberInput(dom.maxMm, (v) => { if (v > 0) { state.settings.maxMm = v; saveSettings(); } });
-  dom.find.addEventListener('click', findMoles);
+  dom.find.addEventListener('click', () => findMoles());
 
   numberInput(dom.matchMm, (v) => { if (v > 0) { state.settings.matchMm = v; saveSettings(); state.version++; renderPanel(); requestDraw(); } });
   numberInput(dom.growthMm, (v) => { if (v > 0) { state.settings.growthMm = v; saveSettings(); state.version++; renderPanel(); requestDraw(); } });

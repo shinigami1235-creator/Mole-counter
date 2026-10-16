@@ -22,6 +22,16 @@ const truth = require('./sample/truth.json');
   console.log((await page.$$eval('#table tbody tr', (t) => t.map((r) => r.innerText.replace(/\s+/g, ' ')))).join('\n'));
   console.log('B scale from last visit:', await page.evaluate(() => { const r = compare(); return r.bFromLast + ' ' + r.sB.toFixed(2); }));
   console.log(await page.$$eval('.stat', (d) => d.map((x) => x.innerText.replace(/\n/g, ' ')).join(', ')));
+  // Take one matched mole off this visit and check it is found again at the last visit's spot.
+  console.log('found again:', await page.evaluate(() => {
+    const r = compare();
+    const row = r.rows.find((x) => x.status === 'same' && x.lastMm > 2.5);
+    B.moles = B.moles.filter((m) => m !== row.b);
+    const n = findAtLastSpots(B);
+    state.version++;
+    const back = compare().rows.find((x) => x.label === row.label);
+    return n + ' added, mole ' + row.label + ' is ' + back.status + ' at ' + back.nowMm.toFixed(1) + ' mm';
+  }));
   await page.click('[data-tab="a"]');
   await page.click('#face-find');
   await page.waitForTimeout(3000);

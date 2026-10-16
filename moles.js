@@ -6,11 +6,12 @@
 (function (root) {
   'use strict';
 
-  // Brightness weighted towards green and blue, where melanin shows most.
+  // Brightness from green and blue, where melanin shows most. Red is
+  // mostly left out since a flat brown spot barely changes it.
   function brightness(rgba, n) {
     const v = new Uint8ClampedArray(n);
     for (let i = 0, j = 0; i < n; i++, j += 4) {
-      v[i] = 0.25 * rgba[j] + 0.45 * rgba[j + 1] + 0.30 * rgba[j + 2];
+      v[i] = 0.10 * rgba[j] + 0.45 * rgba[j + 1] + 0.45 * rgba[j + 2];
     }
     return v;
   }
@@ -259,11 +260,32 @@
 
   // Finds every spot darker than the skin around it within the size range.
   // opts: pxPerMm (working pixels), minMm, maxMm, sensitivity 1 to 10.
+  // Two passes: one against the skin over about 15 mm for larger moles, and
+  // one against the skin within 3 mm, which picks out small faint spots
+  // that a shadow or a blush across the cheek would hide from the first.
   function detect(v, w, h, opts) {
+    const big = detectPass(v, w, h, opts);
+    if (opts.smallPass === false) return big;
+    const small = detectPass(v, w, h, Object.assign({}, opts, { maxMm: Math.min(opts.maxMm, 4), bgMm: 3 }));
+    const near = Math.max(2, opts.pxPerMm * 0.5);
+    const inside = (m, o) => {
+      const { x0, y0, w: mw, h: mh, data } = o.mask;
+      const x = Math.floor(m.cx) - x0, y = Math.floor(m.cy) - y0;
+      return x >= 0 && y >= 0 && x < mw && y < mh && data[y * mw + x] === 1;
+    };
+    const out = big.slice();
+    for (const m of small) {
+      if (out.some((o) => Math.hypot(o.cx - m.cx, o.cy - m.cy) < near || inside(m, o))) continue;
+      out.push(m);
+    }
+    return out;
+  }
+
+  function detectPass(v, w, h, opts) {
     const ppm = opts.pxPerMm;
     const minPx = opts.minMm * ppm, maxPx = opts.maxMm * ppm;
     const drop = dropForSensitivity(opts.sensitivity);
-    const B = skinBackground(v, w, h, Math.max(6, maxPx), drop);
+    const B = skinBackground(v, w, h, Math.max(6, opts.bgMm ? opts.bgMm * ppm : maxPx), drop);
 
     const mask = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
@@ -305,7 +327,7 @@
     for (const c of candidates) {
       const sx = c.seed % w, sy = (c.seed / w) | 0;
       const half = Math.round(Math.max(c.bw, c.bh) * 1.2 + ppm * 1.5);
-      const m = segmentFromSeed(v, w, h, sx, sy, Math.min(half, Math.round(maxPx * 1.6)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)) });
+      const m = segmentFromSeed(v, w, h, sx, sy, Math.min(half, Math.round(maxPx * 1.6)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: opts.minContrast || 0.08 });
       if (!m) continue;
       const d = eqDiameter(m.area);
       if (d < minPx || d > maxPx) continue;
@@ -320,7 +342,7 @@
   // the tap and grows the region from there.
   function segmentAt(v, w, h, x, y, opts) {
     const ppm = opts.pxPerMm || 8;
-    const r = Math.max(2, Math.round(ppm));
+    const r = Math.max(2, Math.round(ppm * (opts.searchMm || 1)));
     let bx = Math.round(x), by = Math.round(y), best = 256;
     for (let yy = Math.max(0, by - r); yy <= Math.min(h - 1, by + r); yy++) {
       for (let xx = Math.max(0, bx - r); xx <= Math.min(w - 1, bx + r); xx++) {
@@ -330,7 +352,7 @@
     }
     const maxPx = (opts.maxMm || 15) * ppm;
     for (const f of [0.35, 0.7, 1.1]) {
-      const m = segmentFromSeed(v, w, h, bx, by, Math.max(6, Math.round(maxPx * f)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: 0.03 });
+      const m = segmentFromSeed(v, w, h, bx, by, Math.max(6, Math.round(maxPx * f)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: opts.minContrast || 0.03 });
       if (m) return m;
     }
     return null;

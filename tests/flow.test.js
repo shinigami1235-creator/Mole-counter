@@ -28,9 +28,9 @@ const vw = Number(process.env.VW || 1400), vh = Number(process.env.VH || 900);
   async function doPhoto(key, file, ruler, lms) {
     await page.click('[data-tab="' + key + '"]');
     await page.setInputFiles('#file', file);
-    await page.waitForFunction((k) => state.photos[k].bitmap, key);
+    await page.waitForFunction((k) => state.photos[k].bitmap && !state.photos[k].faceBusy, key, { timeout: 60000 });
     await page.waitForTimeout(100);
-    for (const q of ruler) { await focus(key, q[0], q[1]); await tapImage(key, q[0], q[1]); }
+    await page.evaluate(([k, r]) => { const p = state.photos[k]; p.scaleMode = 'ruler'; p.ruler = r; changed(); }, [key, ruler]);
     await page.click('[data-tool="landmark"]');
     for (const q of lms) { await focus(key, q[0], q[1]); await tapImage(key, q[0], q[1]); }
     await page.click('#fit');

@@ -32,6 +32,28 @@ const FACE_FRAMINGS = [
   [0, 0, 0, 0], [0.15, 0.15, 0.15, 0.15], [-0.08, -0.08, -0.08, -0.08], [-0.06, 0, 0.06, 0], [0.06, 0, -0.06, 0],
 ];
 const FACE_DETECT_MAX = 1600;   // longest side handed to the detector
+// Person finder for photos without a face: its classes 2 and 3 are body
+// skin and face skin.
+const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
+// Face map outline and the parts inside it that are never moles, each
+// grown about its centre to take in lashes, brow hairs and lip edges.
+const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
+  152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
+const FACE_HOLES = [
+  [[33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246], 1.55],          // right eye
+  [[263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466], 1.55],       // left eye
+  [[46, 53, 52, 65, 55, 107, 66, 105, 63, 70], 1.3],                                                // right brow
+  [[276, 283, 282, 295, 285, 336, 296, 334, 293, 300], 1.3],                                        // left brow
+  [[61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185], 1.15], // lips
+  [[129, 4, 358, 327, 2, 98], 1.15],                                                                // nostrils
+];
+// Visible iris width in adults, the usual stand-in for a ruler on a face.
+const IRIS_MM = 11.7;
+// Without a face or a ruler the longer side of the photo is taken as this
+// many mm, about a forearm at arm's length.
+const ROUGH_MM = 300;
+const AREA_MAX = 800;   // longest side of the area mask
+const BRUSH_PX = 22;    // area brush radius on screen
 
 const COLORS = {
   mark: '#E0B45A',
@@ -55,9 +77,11 @@ function newPhoto(key) {
     key,
     name: '', bitmap: null, W: 0, H: 0,
     ws: 1, ww: 0, wh: 0, v: null,
-    scaleMode: 'ruler', ruler: [], rulerMm: 10,
+    scaleMode: 'estimate', ruler: [], rulerMm: 10,
     landmarks: [], lmMm: null, faceLandmarks: false, faceBusy: false,
-    moles: [], history: [], view: null,
+    faceMesh: null, irisPx: null,
+    area: null, areaSource: '', areaEdited: false, areaOverlay: null, areaRgba: null, areaDims: null,
+    moles: [], history: [], view: null, viewTouched: false,
   };
 }
 
@@ -66,6 +90,7 @@ const state = {
   tool: null,
   cview: 'b',
   selected: null,       // compare row key, or a mole id on a photo tab
+  brush: 'add',         // area brush: add or erase
   version: 0,
   settings: { sensitivity: 7, minMm: 1, maxMm: 15, matchMm: 3, growthMm: 1 },
   photos: { a: newPhoto('a'), b: newPhoto('b') },
@@ -114,6 +139,11 @@ function lastVisitLandmarkMm() {
 
 // Original photo pixels per millimetre, or null when the scale is not set.
 function pxPerMm(p) {
+  if (!p.bitmap) return null;
+  if (p.scaleMode === 'estimate') {
+    if (p.irisPx) return p.irisPx / IRIS_MM;
+    return Math.max(p.W, p.H) / ROUGH_MM;
+  }
   if (p.scaleMode === 'ruler') {
     if (p.ruler.length < 2 || !(p.rulerMm > 0)) return null;
     const d = dist(p.ruler[0], p.ruler[1]);
@@ -129,6 +159,13 @@ function pxPerMm(p) {
 function moleMm(p, m) {
   const s = pxPerMm(p);
   return s ? { d: m.feret / s, area: m.area / (s * s) } : null;
+}
+
+// How far apart the two photo scales may be when lining up on moles. A
+// rough estimate can be far off, an iris estimate a little.
+function scaleSlack() {
+  const kind = (p) => p.scaleMode !== 'estimate' ? 0.12 : p.irisPx ? 0.25 : 0.6;
+  return Math.max(kind(A), kind(B));
 }
 
 // Numbers the last visit's moles top to bottom, left to right, in bands.
@@ -168,7 +205,8 @@ function buildCompare() {
   }
   if (missing.length) return { missing };
 
-  const sA = pxPerMm(A), sB = pxPerMm(B);
+  const sA = pxPerMm(A);
+  let sB = pxPerMm(B);
   let T, residualMm = null, n = 0, byMoles = null;
   if (useLandmarks) {
     n = A.landmarks.length;
@@ -185,7 +223,7 @@ function buildCompare() {
   } else {
     // No landmarks on one photo: line the photos up on the moles themselves.
     const res = C.alignByMoles(A.moles.map((m) => [m.cx, m.cy]), B.moles.map((m) => [m.cx, m.cy]),
-      sA / sB, state.settings.matchMm * sA);
+      sA / sB, state.settings.matchMm * sA, { scaleSlack: scaleSlack() });
     if (!res) {
       return { missing: ['The moles on the two photos could not be lined up. Place at least 2 landmarks on both photos in the same order.'] };
     }
@@ -193,6 +231,13 @@ function buildCompare() {
     byMoles = { inliers: res.inliers, rmsMm: res.rms / sA };
   }
   const Tinv = C.invertTransform(T);
+
+  // An estimated scale on this visit is replaced by the last visit's scale
+  // carried across the alignment, since that holds both visits to one ruler.
+  const bFromLast = B.scaleMode === 'estimate';
+  if (bFromLast) sB = sA / Math.sqrt(Math.abs(T[0] * T[4] - T[1] * T[3]));
+  const mmA = (m) => ({ d: m.feret / sA, area: m.area / (sA * sA) });
+  const mmB = (m) => ({ d: m.feret / sB, area: m.area / (sB * sB) });
 
   let stretch = null;
   if (useLandmarks && A.scaleMode === 'ruler' && B.scaleMode === 'ruler') {
@@ -212,11 +257,11 @@ function buildCompare() {
   const rows = [];
   A.moles.forEach((m, i) => {
     const label = numbers.get(m.id);
-    const last = moleMm(A, m);
+    const last = mmA(m);
     const row = { key: 'a' + m.id, label, a: m, b: null, lastMm: last.d, lastArea: last.area, sort: Number(label) };
     if (byLast.has(i)) {
       const bm = B.moles[byLast.get(i)];
-      const now = moleMm(B, bm);
+      const now = mmB(bm);
       row.b = bm; row.nowMm = now.d; row.nowArea = now.area;
       row.change = now.d - last.d;
       row.pct = (now.d / last.d - 1) * 100;
@@ -234,7 +279,7 @@ function buildCompare() {
   const fresh = B.moles.filter((m, j) => !usedNow.has(j)).sort((m, k) =>
     (Math.floor(m.cy / bandB) - Math.floor(k.cy / bandB)) || (m.cx - k.cx));
   fresh.forEach((m, k) => {
-    const now = moleMm(B, m);
+    const now = mmB(m);
     const posA = C.applyTransform(T, m.cx, m.cy);
     rows.push({ key: 'b' + m.id, label: 'N' + (k + 1), a: null, b: m, nowMm: now.d, nowArea: now.area,
       status: 'new', posA, sort: 100000 + k });
@@ -254,14 +299,15 @@ function buildCompare() {
     if (r.b) { labelOfB.set(r.b.id, r.label); statusOfB.set(r.b.id, r); }
     if (r.a) statusOfA.set(r.a.id, r);
   }
-  return { rows, stats, n, residualMm, byMoles, stretch, T, Tinv, labelOfB, statusOfA, statusOfB, numbers };
+  return { rows, stats, n, residualMm, byMoles, stretch, T, Tinv, labelOfB, statusOfA, statusOfB, numbers, sA, sB, bFromLast };
 }
 
 // ---------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------
 function pushHistory(p) {
-  p.history.push({ ruler: p.ruler.map((q) => q.slice()), landmarks: p.landmarks.map((q) => q.slice()), moles: p.moles.slice(), face: p.faceLandmarks });
+  p.history.push({ ruler: p.ruler.map((q) => q.slice()), landmarks: p.landmarks.map((q) => q.slice()), moles: p.moles.slice(),
+    face: p.faceLandmarks, area: p.area, areaSource: p.areaSource, areaEdited: p.areaEdited });
   if (p.history.length > 60) p.history.shift();
 }
 function undo() {
@@ -269,6 +315,7 @@ function undo() {
   if (!p || !p.history.length) return;
   const h = p.history.pop();
   p.ruler = h.ruler; p.landmarks = h.landmarks; p.moles = h.moles; p.faceLandmarks = h.face;
+  p.area = h.area; p.areaSource = h.areaSource; p.areaEdited = h.areaEdited; p.areaOverlay = null;
   changed();
 }
 
@@ -316,7 +363,9 @@ async function loadPhoto(file) {
   }
   Object.assign(p, {
     name: file.name, bitmap: bmp, W: bmp.width, H: bmp.height,
-    ruler: [], landmarks: [], moles: [], history: [], view: null, faceLandmarks: false,
+    ruler: [], landmarks: [], moles: [], history: [], view: null, viewTouched: false,
+    faceLandmarks: false, irisPx: null, faceMesh: null, skinArea: null,
+    area: null, areaSource: '', areaEdited: false, areaOverlay: null,
   });
   p.ws = Math.min(1, WORK_MAX / Math.max(p.W, p.H));
   p.ww = Math.round(p.W * p.ws);
@@ -326,30 +375,157 @@ async function loadPhoto(file) {
   const cx = cv.getContext('2d', { willReadFrequently: true });
   cx.drawImage(bmp, 0, 0, p.ww, p.wh);
   p.v = C.brightness(cx.getImageData(0, 0, p.ww, p.wh).data, p.ww * p.wh);
+
+  // Skin by colour first since it is instant; the face map or the person
+  // finder replaces it a moment later.
+  const ak = Math.min(1, AREA_MAX / Math.max(p.W, p.H));
+  const aw = Math.max(1, Math.round(p.W * ak)), ah = Math.max(1, Math.round(p.H * ak));
+  const small = document.createElement('canvas');
+  small.width = aw; small.height = ah;
+  const sx = small.getContext('2d', { willReadFrequently: true });
+  sx.drawImage(bmp, 0, 0, aw, ah);
+  p.areaRgba = sx.getImageData(0, 0, aw, ah).data;
+  p.areaDims = { w: aw, h: ah, k: ak };
+  setColourArea(p);
+
   fitView(p);
-  if (!state.tool) setTool(p.scaleMode === 'ruler' ? 'ruler' : 'landmark');
+  zoomToArea(p);
+  if (state.tool === 'ruler' || state.tool === 'landmark' || state.tool === 'area') state.tool = null;
   changed();
-  findFaceLandmarks(p, true);
+  analysePhoto(p, true);
 }
 
 // ---------------------------------------------------------------------
-// Face landmarks
+// Area
 // ---------------------------------------------------------------------
+function blankArea(p) {
+  const { w, h, k } = p.areaDims;
+  return { w, h, k, data: new Uint8Array(w * h) };
+}
+
+function setColourArea(p) {
+  const { w, h, k } = p.areaDims;
+  const m = C.skinByColour(p.areaRgba, w, h, 0.05);
+  if (m) { p.area = { w, h, k, data: m }; p.areaSource = 'colour'; }
+  else { p.area = null; p.areaSource = 'whole'; }
+  p.areaOverlay = null;
+}
+
+// The face without the eyes, brows, lips and nostrils, from the face map.
+function setFaceArea(p, mesh) {
+  const a = blankArea(p);
+  const at = (i) => [mesh[i][0] * a.k, mesh[i][1] * a.k];
+  C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(FACE_OVAL.map(at), 1.03), 1);
+  for (const [idx, grow] of FACE_HOLES) C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(idx.map(at), grow), 0);
+  p.area = a;
+  p.areaSource = 'face';
+  p.areaOverlay = null;
+}
+
+function setWholeArea(p) {
+  p.area = null;
+  p.areaSource = 'whole';
+  p.areaOverlay = null;
+}
+
+function inArea(p, x, y) {
+  if (!p.area) return true;
+  const a = p.area;
+  const ax = Math.floor(x * a.k), ay = Math.floor(y * a.k);
+  if (ax < 0 || ay < 0 || ax >= a.w || ay >= a.h) return false;
+  return a.data[ay * a.w + ax] === 1;
+}
+
+// Drops moles that sit outside the area.
+function trimToArea(p) {
+  p.moles = p.moles.filter((m) => inArea(p, m.cx, m.cy));
+}
+
+function zoomToArea(p) {
+  if (!viewer.w) return;
+  const a = p.area;
+  const b = a ? C.maskBounds(a.data, a.w, a.h) : null;
+  if (!b) { fitView(p); return; }
+  const x0 = b[0] / a.k, y0 = b[1] / a.k, x1 = b[2] / a.k, y1 = b[3] / a.k;
+  const pad = 0.06;
+  const bw = (x1 - x0) * (1 + 2 * pad), bh = (y1 - y0) * (1 + 2 * pad);
+  const s = Math.min(viewer.w / bw, viewer.h / bh);
+  p.view = { s, tx: viewer.w / 2 - (x0 + x1) / 2 * s, ty: viewer.h / 2 - (y0 + y1) / 2 * s };
+}
+
+// Dimmed copy of everything outside the area, drawn over the photo.
+function areaOverlay(p) {
+  if (!p.area) return null;
+  if (p.areaOverlay) return p.areaOverlay;
+  const { w, h, data } = p.area;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const g = cv.getContext('2d');
+  const img = g.createImageData(w, h);
+  for (let k = 0; k < w * h; k++) {
+    if (data[k]) continue;
+    const j = k * 4;
+    img.data[j] = 8; img.data[j + 1] = 14; img.data[j + 2] = 22; img.data[j + 3] = 165;
+  }
+  g.putImageData(img, 0, 0);
+  p.areaOverlay = cv;
+  return cv;
+}
+
+// Paints the area in or out under the brush. x, y in screen pixels.
+function paintArea(p, x, y) {
+  if (!p.area) {
+    const a = blankArea(p);
+    a.data.fill(1);
+    p.area = a;
+  }
+  const a = p.area;
+  const [ix, iy] = toImage(p, x, y);
+  const cx = ix * a.k, cy = iy * a.k;
+  const r = Math.max(1, BRUSH_PX / p.view.s * a.k);
+  const val = state.brush === 'erase' ? 0 : 1;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(a.w - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(a.h - 1, Math.ceil(cy + r));
+  for (let yy = y0; yy <= y1; yy++) {
+    for (let xx = x0; xx <= x1; xx++) {
+      if ((xx + 0.5 - cx) ** 2 + (yy + 0.5 - cy) ** 2 <= r * r) a.data[yy * a.w + xx] = val;
+    }
+  }
+  p.areaOverlay = null;
+}
+
+// ---------------------------------------------------------------------
+// Face map and person finder (MediaPipe)
+// ---------------------------------------------------------------------
+let mpVision = null, mpFiles = null;
 let faceDetector = null, faceDetectorFail = null;
+let segmenter = null, segmenterFail = null;
+
+async function loadVision() {
+  if (!mpVision) {
+    mpVision = await import(MP_URL);
+    mpFiles = await mpVision.FilesetResolver.forVisionTasks(MP_WASM);
+  }
+  return mpVision;
+}
+
+async function createTask(Task, opts) {
+  try {
+    opts.baseOptions.delegate = 'GPU';
+    return await Task.createFromOptions(mpFiles, opts);
+  } catch (e) {
+    opts.baseOptions.delegate = 'CPU';
+    return await Task.createFromOptions(mpFiles, opts);
+  }
+}
 
 async function loadFaceDetector() {
   if (faceDetector) return faceDetector;
   if (faceDetectorFail) throw faceDetectorFail;
   try {
-    const vision = await import(MP_URL);
-    const files = await vision.FilesetResolver.forVisionTasks(MP_WASM);
-    const opts = { baseOptions: { modelAssetPath: MP_MODEL, delegate: 'GPU' }, runningMode: 'IMAGE', numFaces: 1 };
-    try {
-      faceDetector = await vision.FaceLandmarker.createFromOptions(files, opts);
-    } catch (e) {
-      opts.baseOptions.delegate = 'CPU';
-      faceDetector = await vision.FaceLandmarker.createFromOptions(files, opts);
-    }
+    const vision = await loadVision();
+    faceDetector = await createTask(vision.FaceLandmarker,
+      { baseOptions: { modelAssetPath: MP_MODEL }, runningMode: 'IMAGE', numFaces: 1 });
     return faceDetector;
   } catch (e) {
     faceDetectorFail = e;
@@ -357,8 +533,22 @@ async function loadFaceDetector() {
   }
 }
 
-// Median position of each face point over the framings, in photo pixels,
-// or null when fewer than 3 framings find a face.
+async function loadSegmenter() {
+  if (segmenter) return segmenter;
+  if (segmenterFail) throw segmenterFail;
+  try {
+    const vision = await loadVision();
+    segmenter = await createTask(vision.ImageSegmenter,
+      { baseOptions: { modelAssetPath: SEG_MODEL }, runningMode: 'IMAGE', outputCategoryMask: true, outputConfidenceMasks: false });
+    return segmenter;
+  } catch (e) {
+    segmenterFail = e;
+    throw e;
+  }
+}
+
+// The whole face map, each point the median over the framings, in photo
+// pixels. Null when fewer than 3 framings find a face.
 function readFace(det, p) {
   const k = Math.min(1, FACE_DETECT_MAX / Math.max(p.W, p.H));
   const w = Math.round(p.W * k), h = Math.round(p.H * k);
@@ -374,47 +564,100 @@ function readFace(det, p) {
     g.drawImage(p.bitmap, ox, oy, w, h);
     let lms = null;
     try { lms = det.detect(cv)?.faceLandmarks?.[0]; } catch (e) { lms = null; }
-    if (lms && lms.length >= 468) {
-      runs.push(FACE_POINTS.map(([i]) => [(lms[i].x * cw - ox) / k, (lms[i].y * ch - oy) / k]));
-    }
+    if (lms && lms.length >= 468) runs.push(lms.map((q) => [(q.x * cw - ox) / k, (q.y * ch - oy) / k]));
   }
   if (runs.length < 3) return null;
+  const n = Math.min(...runs.map((r) => r.length));
   const median = (v) => { const q = v.slice().sort((x, y) => x - y); return q[q.length >> 1]; };
-  return FACE_POINTS.map((_, j) => [median(runs.map((r) => r[j][0])), median(runs.map((r) => r[j][1]))]);
+  const mesh = [];
+  for (let i = 0; i < n; i++) mesh.push([median(runs.map((r) => r[i][0])), median(runs.map((r) => r[i][1]))]);
+  return mesh;
 }
 
-// Places the face landmarks. On loading a photo it runs quietly and only
-// when the photo has no landmarks yet; the button replaces them.
-async function findFaceLandmarks(p, quiet) {
+// Horizontal iris width in photo pixels, both eyes averaged. Needs the
+// 478-point map with the irises.
+function irisWidth(mesh) {
+  if (mesh.length < 478) return null;
+  const right = dist(mesh[469], mesh[471]), left = dist(mesh[474], mesh[476]);
+  if (!(right > 0) || !(left > 0)) return null;
+  if (Math.max(right, left) / Math.min(right, left) > 1.35) return Math.max(right, left);   // one eye turned away
+  return (right + left) / 2;
+}
+
+// Skin from the person finder: body skin and face skin, with the holes
+// moles leave filled. Null when under 3% of the photo is skin.
+function readSkin(seg, p) {
+  const { w, h, k } = p.areaDims;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(p.bitmap, 0, 0, w, h);
+  let cat = null;
+  try {
+    const res = seg.segment(cv);
+    const mask = res.categoryMask;
+    cat = mask.getAsUint8Array().slice();
+    mask.close && mask.close();
+    res.close && res.close();
+  } catch (e) { return null; }
+  if (!cat || cat.length !== w * h) return null;
+  const m = new Uint8Array(w * h);
+  let n = 0;
+  for (let i = 0; i < w * h; i++) if (cat[i] === 2 || cat[i] === 3) { m[i] = 1; n++; }
+  if (n < w * h * 0.03) return null;
+  const out = C.dilate(C.fillHoles(C.keepLarge(m, w, h, 0.05), w, h), w, h, 1);
+  return { w, h, k, data: out };
+}
+
+// Runs on every new photo: finds the face or the skin, sets the area, the
+// landmarks and the estimated scale, then zooms in. The button runs it
+// again and replaces the landmarks.
+async function analysePhoto(p, onLoad) {
   if (!p.bitmap || p.faceBusy) return;
-  if (quiet && p.landmarks.length) return;
   const bitmap = p.bitmap;
   p.faceBusy = true;
   renderPanel();
-  let pts = null;
+  let mesh = null, skin = null, offline = false;
   try {
-    const det = await loadFaceDetector();
-    await new Promise((r) => setTimeout(r, 0));
-    if (p.bitmap !== bitmap) return;
-    pts = readFace(det, p);
-  } catch (e) {
-    if (!quiet) showToast('Face landmarks need an internet connection the first time.');
-    return;
+    try {
+      const det = await loadFaceDetector();
+      await new Promise((r) => setTimeout(r, 0));
+      if (p.bitmap !== bitmap) return;
+      mesh = readFace(det, p);
+    } catch (e) { offline = true; }
+    if (!mesh && !offline) {
+      try {
+        const seg = await loadSegmenter();
+        if (p.bitmap !== bitmap) return;
+        skin = readSkin(seg, p);
+      } catch (e) { /* keep the colour area */ }
+    }
   } finally {
     p.faceBusy = false;
-    renderPanel();
   }
   if (p.bitmap !== bitmap) return;
-  if (!pts) {
-    if (!quiet) showToast('No face found in this photo.');
-    return;
+
+  if (mesh) {
+    if (!onLoad || !p.landmarks.length) {
+      pushHistory(p);
+      p.landmarks = FACE_POINTS.map(([i]) => mesh[i].slice());
+      p.faceLandmarks = true;
+    }
+    p.faceMesh = mesh;
+    p.irisPx = irisWidth(mesh);
+    if (!p.areaEdited) setFaceArea(p, mesh);
+  } else if (skin) p.skinArea = skin;
+  if (!mesh && skin && !p.areaEdited) {
+    p.area = skin;
+    p.areaSource = 'skin';
+    p.areaOverlay = null;
   }
-  if (quiet && p.landmarks.length) return;
-  pushHistory(p);
-  p.landmarks = pts;
-  p.faceLandmarks = true;
+  if (!p.areaEdited) trimToArea(p);
+  if (onLoad && !p.viewTouched) zoomToArea(p);
   changed();
-  if (activePhoto() === p) showToast('Face found. Landmarks 1 to 6 are on the eye corners, between the eyes and under the nose.');
+  if (activePhoto() !== p) return;
+  if (mesh) showToast('Face found. The area, landmarks and scale are set from it.');
+  else if (offline && !onLoad) showToast('The face finder needs an internet connection the first time.');
+  else if (!onLoad) showToast('No face found in this photo.');
 }
 
 function toMole(p, m, manual) {
@@ -447,15 +690,53 @@ async function findMoles() {
     // An ink dot under a landmark is skipped as a mole.
     const onLandmark = (m) => p.landmarks.some((q) => dist(q, [m.cx, m.cy]) < Math.max(1.5 * s, m.feret / 2));
     const auto = found.map((m) => toMole(p, m, false))
+      .filter((m) => inArea(p, m.cx, m.cy))
       .filter((m) => !onLandmark(m))
       .filter((m) => !manual.some((q) => dist([q.cx, q.cy], [m.cx, m.cy]) < Math.max(q.feret, m.feret) / 2));
     p.moles = manual.concat(auto);
+    p.reviewIndex = -1;
   } finally {
     dom.find.textContent = 'Find moles';
     dom.find.disabled = false;
   }
-  if (state.tool === 'ruler' || state.tool === 'landmark') setTool(null);
+  if (state.tool === 'ruler' || state.tool === 'landmark' || state.tool === 'area') state.tool = null;
   changed();
+}
+
+// Steps through the moles in number order, zoomed in on each one.
+function stepMole(dir) {
+  const p = activePhoto();
+  if (!p || !p.moles.length) return;
+  const order = orderedMoles(p);
+  let i = order.findIndex((m) => m.id === state.selected);
+  i = i < 0 ? (dir > 0 ? 0 : order.length - 1) : (i + dir + order.length) % order.length;
+  const m = order[i];
+  state.selected = m.id;
+  focusOn(p, m.cx, m.cy, 14);
+  renderPanel();
+}
+
+function removeSelectedMole() {
+  const p = activePhoto();
+  if (!p) return;
+  const order = orderedMoles(p);
+  const i = order.findIndex((m) => m.id === state.selected);
+  if (i < 0) return;
+  pushHistory(p);
+  p.moles = p.moles.filter((m) => m.id !== state.selected);
+  const next = order[i + 1] || order[i - 1];
+  state.selected = next ? next.id : null;
+  if (next) focusOn(p, next.cx, next.cy, 14);
+  changed();
+}
+
+function orderedMoles(p) {
+  if (p === A) {
+    const numbers = numberLastVisit();
+    return p.moles.slice().sort((m, n) => Number(numbers.get(m.id)) - Number(numbers.get(n.id)));
+  }
+  const s = pxPerMm(p) || p.H / 200, band = 12 * s;
+  return p.moles.slice().sort((m, n) => (Math.floor(m.cy / band) - Math.floor(n.cy / band)) || (m.cx - n.cx));
 }
 
 // ---------------------------------------------------------------------
@@ -481,10 +762,11 @@ function zoomAt(p, x, y, factor) {
   v.s = ns;
 }
 
-// Shows a spot about 20 mm across in the middle of the view.
-function focusOn(p, x, y) {
+// Shows a spot `fieldMm` across (20 mm unless given) in the middle of the view.
+function focusOn(p, x, y, fieldMm) {
   const s = pxPerMm(p) || 8;
-  const ns = Math.min(viewer.w, viewer.h) / (20 * s);
+  const ns = Math.min(viewer.w, viewer.h) / ((fieldMm || 20) * s);
+  p.viewTouched = true;
   p.view = { s: ns, tx: viewer.w / 2 - x * ns, ty: viewer.h / 2 - y * ns };
   requestDraw();
 }
@@ -599,7 +881,7 @@ function drawMarks(ctx, p, k, ox, oy, opts) {
       if (!pos) continue;
       const [x, y] = S(pos[0], pos[1]);
       const other = p === B ? r.a : r.b;
-      const sOther = pxPerMm(p === B ? A : B), sHere = pxPerMm(p);
+      const sOther = p === B ? res.sA : res.sB, sHere = p === B ? res.sB : res.sA;
       const rad = Math.max(other.feret / 2 / sOther * sHere * k + 3 * lw, 6 * lw);
       ring(x, y, rad, COLORS[r.status], true, state.selected === r.key ? 2.5 * lw : lw);
       label(r.label, x + rad + 3 * lw, y - rad, COLORS[r.status]);
@@ -651,7 +933,16 @@ function draw() {
   ctx.imageSmoothingEnabled = v.s < 2;
   ctx.drawImage(p.bitmap, v.tx, v.ty, p.W * v.s, p.H * v.s);
   ctx.imageSmoothingEnabled = true;
+  const ov = areaOverlay(p);
+  if (ov) ctx.drawImage(ov, v.tx, v.ty, p.W * v.s, p.H * v.s);
   drawMarks(ctx, p, v.s, v.tx, v.ty, {});
+  if (state.tool === 'area' && viewer.brushAt) {
+    ctx.beginPath();
+    ctx.arc(viewer.brushAt[0], viewer.brushAt[1], BRUSH_PX, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = state.brush === 'erase' ? '#FF8A8A' : '#FFFFFF';
+    ctx.stroke();
+  }
 }
 
 function updateEmpty(p) {
@@ -698,9 +989,18 @@ function onPointerDown(e) {
   viewer.canvas.setPointerCapture(e.pointerId);
   const [x, y] = localXY(e);
   pointers.set(e.pointerId, [x, y]);
-  if (pointers.size === 1) {
+  if (pointers.size === 1 && state.tool === 'area' && state.tab !== 'compare') {
+    pushHistory(p);
+    if (p.area) p.area = Object.assign({}, p.area, { data: p.area.data.slice() });
+    paintArea(p, x, y);
+    viewer.brushAt = [x, y];
+    gesture = { type: 'paint', lx: x, ly: y };
+    requestDraw();
+  } else if (pointers.size === 1) {
     gesture = { type: 'pending', sx: x, sy: y, lx: x, ly: y, handle: state.tab !== 'compare' ? handleAt(p, x, y) : null };
   } else if (pointers.size === 2) {
+    if (gesture && gesture.type === 'paint') finishPaint(p);
+    p.viewTouched = true;
     const [p1, p2] = [...pointers.values()];
     gesture = { type: 'pinch', d0: dist(p1, p2), c0: [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2], v0: Object.assign({}, p.view) };
   } else {
@@ -713,7 +1013,18 @@ function onPointerMove(e) {
   const p = shownPhoto();
   const [x, y] = localXY(e);
   pointers.set(e.pointerId, [x, y]);
+  if (state.tool === 'area') { viewer.brushAt = [x, y]; requestDraw(); }
   if (!gesture) return;
+  if (gesture.type === 'paint') {
+    // Paint along the stroke in steps of half a brush so a fast swipe leaves no gaps.
+    const steps = Math.max(1, Math.ceil(Math.hypot(x - gesture.lx, y - gesture.ly) / (BRUSH_PX / 2)));
+    for (let i = 1; i <= steps; i++) {
+      paintArea(p, gesture.lx + (x - gesture.lx) * i / steps, gesture.ly + (y - gesture.ly) * i / steps);
+    }
+    gesture.lx = x; gesture.ly = y;
+    requestDraw();
+    return;
+  }
   if (gesture.type === 'pinch' && pointers.size === 2) {
     const [p1, p2] = [...pointers.values()];
     const d = dist(p1, p2), c = [(p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2];
@@ -730,6 +1041,7 @@ function onPointerMove(e) {
     else gesture.type = 'pan';
   }
   if (gesture.type === 'pan') {
+    p.viewTouched = true;
     p.view.tx += x - gesture.lx;
     p.view.ty += y - gesture.ly;
     requestDraw();
@@ -748,12 +1060,34 @@ function onPointerMove(e) {
 function onPointerUp(e) {
   if (!pointers.has(e.pointerId)) return;
   pointers.delete(e.pointerId);
+  if (e.pointerType !== 'mouse') { viewer.brushAt = null; requestDraw(); }
   if (gesture && gesture.type === 'pending' && pointers.size === 0 && e.type === 'pointerup') {
     onTap(gesture.sx, gesture.sy);
   }
   if (gesture && gesture.type === 'handle') changed();
+  if (gesture && gesture.type === 'paint') finishPaint(shownPhoto());
   if (pointers.size === 0) gesture = null;
   else if (gesture && gesture.type === 'pinch') gesture = { type: 'none' };
+}
+
+// Two marks 10 mm apart by the current scale, side by side in the middle
+// of the view, for the doctor to drag onto the ruler.
+function placeRulerMarks(p, sNow) {
+  const s = sNow || Math.max(p.W, p.H) / ROUGH_MM;
+  const [cx, cy] = toImage(p, viewer.w / 2, viewer.h / 2);
+  const half = 5 * s;
+  p.ruler = [[cx - half, cy], [cx + half, cy]];
+  p.rulerMm = 10;
+}
+
+// Ends a brush stroke: the area now counts as painted by hand and moles
+// outside it are dropped.
+function finishPaint(p) {
+  gesture = { type: 'none' };
+  p.areaSource = 'painted';
+  p.areaEdited = true;
+  trimToArea(p);
+  changed();
 }
 
 function onWheel(e) {
@@ -761,6 +1095,7 @@ function onWheel(e) {
   if (!p || !p.bitmap) return;
   e.preventDefault();
   const [x, y] = localXY(e);
+  p.viewTouched = true;
   zoomAt(p, x, y, Math.exp(-e.deltaY * 0.0015));
   requestDraw();
 }
@@ -905,6 +1240,8 @@ function statusText() {
       return 'Tap landmark ' + n + '. Drag a landmark to move it.';
     }
     case 'add': return 'Tap the centre of a missed mole.';
+    case 'area': return (state.brush === 'erase' ? 'Drag to take skin out of the area.' : 'Drag to paint skin into the area.') +
+      ' Move the photo with two fingers, or turn the tool off.';
     case 'remove': return 'Tap a mark to remove it.';
     default: return 'Drag to move. Pinch or scroll to zoom.';
   }
@@ -942,7 +1279,20 @@ function renderPhotoPanel() {
   dom.pick.textContent = p.bitmap ? 'Choose another photo' : 'Choose photo';
   dom.photoMeta.textContent = p.bitmap ? p.name + ', ' + p.W + ' × ' + p.H : '';
 
+  const areaWords = {
+    face: 'Area: the face, without the eyes, brows, lips and nostrils.',
+    skin: 'Area: the skin.',
+    colour: 'Area: the skin, found by its colour.',
+    whole: 'Area: the whole photo.',
+    painted: 'Area: painted by hand.',
+  };
+  dom.areaResult.textContent = !p.bitmap ? '' : p.faceBusy ? 'Looking for a face or skin.' : areaWords[p.areaSource] || '';
+  for (const b of dom.brushSeg.querySelectorAll('button')) b.classList.toggle('is-active', b.dataset.brush === state.brush);
+  dom.areaAgain.disabled = !p.bitmap || p.faceBusy;
+  dom.areaWhole.disabled = !p.bitmap || p.areaSource === 'whole';
+
   for (const b of dom.scaleSeg.querySelectorAll('button')) b.classList.toggle('is-active', b.dataset.scale === p.scaleMode);
+  dom.scaleEstimate.hidden = p.scaleMode !== 'estimate';
   dom.scaleRuler.hidden = p.scaleMode !== 'ruler';
   dom.scaleLandmarks.hidden = p.scaleMode !== 'landmarks';
   setInput(dom.rulerMm, p.rulerMm);
@@ -953,8 +1303,14 @@ function renderPhotoPanel() {
   dom.lmMmFrom.textContent = fromLast ? 'From the last visit: ' + fmt(fromLast) + ' mm. Type a value to use your own.' : '';
 
   const s = pxPerMm(p);
+  dom.estimateNote.textContent = p === B
+    ? 'Compare replaces this estimate with the last visit\'s scale, carried across by the landmarks or the moles.'
+    : 'A face is measured against the iris, which is ' + IRIS_MM + ' mm wide in adults. Without a face the photo is taken as ' + ROUGH_MM + ' mm across. A ruler gives true sizes.';
   if (!p.bitmap) dom.scaleResult.textContent = '';
-  else if (s) dom.scaleResult.textContent = 'Scale: ' + fmt(s) + ' pixels per mm.';
+  else if (s && p.scaleMode === 'estimate') {
+    dom.scaleResult.textContent = 'Scale: ' + fmt(s) + ' pixels per mm, ' +
+      (p.irisPx ? 'estimated from the iris.' : 'a rough estimate from the photo size.');
+  } else if (s) dom.scaleResult.textContent = 'Scale: ' + fmt(s) + ' pixels per mm.';
   else if (p.scaleMode === 'ruler') dom.scaleResult.textContent = p.ruler.length < 2 ? 'Tap ' + (2 - p.ruler.length) + ' more ruler mark' + (p.ruler.length === 1 ? '' : 's') + '.' : 'Type the distance between the marks.';
   else dom.scaleResult.textContent = p.landmarks.length < 2 ? 'Place landmarks 1 and 2.' : 'Type the distance between landmarks 1 and 2.';
 
@@ -974,10 +1330,14 @@ function renderPhotoPanel() {
   setInput(dom.minMm, st.minMm);
   setInput(dom.maxMm, st.maxMm);
   dom.find.disabled = !s;
-  dom.findHint.hidden = !!s || !p.bitmap;
   const auto = p.moles.filter((m) => !m.manual).length, manual = p.moles.length - auto;
   dom.moleCount.textContent = !p.moles.length ? '' :
     p.moles.length + (p.moles.length === 1 ? ' mole' : ' moles') + (manual ? ', ' + manual + ' added by hand.' : '.');
+  const order = orderedMoles(p);
+  const at = order.findIndex((m) => m.id === state.selected);
+  dom.review.hidden = !p.moles.length;
+  dom.moleDrop.disabled = at < 0;
+  if (at >= 0) dom.moleCount.textContent += ' Showing ' + (at + 1) + ' of ' + order.length + '.';
   dom.undo.disabled = !p.history.length;
 }
 
@@ -1191,8 +1551,9 @@ function numberInput(el, fn) {
 function wire() {
   const ids = ['view', 'empty', 'empty-pick', 'empty-note', 'toolbar', 'tools', 'undo', 'fit', 'status',
     'panel-photo', 'panel-compare', 'photo-title', 'pick', 'photo-meta', 'scale-seg', 'scale-ruler',
-    'scale-landmarks', 'ruler-mm', 'lm-mm', 'lm-mm-from', 'scale-result', 'lm-count', 'lm-undo', 'face-find', 'sens',
-    'sens-out', 'min-mm', 'max-mm', 'find', 'find-hint', 'mole-count', 'missing', 'compare-body', 'stats',
+    'scale-landmarks', 'scale-estimate', 'estimate-note', 'area-result', 'brush-seg', 'area-again', 'area-whole',
+    'review', 'mole-prev', 'mole-drop', 'mole-next', 'ruler-mm', 'lm-mm', 'lm-mm-from', 'scale-result', 'lm-count', 'lm-undo', 'face-find', 'sens',
+    'sens-out', 'min-mm', 'max-mm', 'find', 'mole-count', 'missing', 'compare-body', 'stats',
     'align', 'stretch', 'panel', 'match-mm', 'growth-mm', 'cview-seg', 'table', 'csv', 'save-photos', 'file', 'toast'];
   for (const id of ids) dom[id.replace(/-(\w)/g, (m, c) => c.toUpperCase())] = $(id);
   dom.toolsRow = dom.tools;
@@ -1220,16 +1581,41 @@ function wire() {
   for (const b of dom.scaleSeg.querySelectorAll('button')) {
     b.addEventListener('click', () => {
       const p = activePhoto();
+      const was = pxPerMm(p);
       p.scaleMode = b.dataset.scale;
-      if (p.bitmap && (state.tool === 'ruler' || state.tool === 'landmark' || !state.tool)) {
-        state.tool = p.scaleMode === 'ruler' ? 'ruler' : 'landmark';
-      }
+      if (p.bitmap && p.scaleMode === 'ruler') {
+        if (p.ruler.length < 2) placeRulerMarks(p, was);
+        state.tool = 'ruler';
+      } else if (state.tool === 'ruler') state.tool = null;
       changed();
     });
   }
+  for (const b of dom.brushSeg.querySelectorAll('button')) {
+    b.addEventListener('click', () => { state.brush = b.dataset.brush; state.tool = 'area'; renderPanel(); requestDraw(); });
+  }
+  dom.areaAgain.addEventListener('click', () => {
+    const p = activePhoto();
+    pushHistory(p);
+    p.areaEdited = false;
+    if (p.faceMesh) setFaceArea(p, p.faceMesh);
+    else if (p.skinArea) { p.area = p.skinArea; p.areaSource = 'skin'; p.areaOverlay = null; }
+    else setColourArea(p);
+    zoomToArea(p);
+    changed();
+  });
+  dom.areaWhole.addEventListener('click', () => {
+    const p = activePhoto();
+    pushHistory(p);
+    setWholeArea(p);
+    p.areaEdited = true;
+    changed();
+  });
+  dom.molePrev.addEventListener('click', () => stepMole(-1));
+  dom.moleNext.addEventListener('click', () => stepMole(1));
+  dom.moleDrop.addEventListener('click', removeSelectedMole);
   numberInput(dom.rulerMm, (v) => { activePhoto().rulerMm = v; state.version++; renderPanel(); requestDraw(); });
   numberInput(dom.lmMm, (v) => { activePhoto().lmMm = v > 0 ? v : null; state.version++; renderPanel(); requestDraw(); });
-  dom.faceFind.addEventListener('click', () => findFaceLandmarks(activePhoto(), false));
+  dom.faceFind.addEventListener('click', () => analysePhoto(activePhoto(), false));
   dom.lmUndo.addEventListener('click', () => {
     const p = activePhoto();
     if (!p.landmarks.length) return;

@@ -10,13 +10,17 @@ const truth = require('./sample/truth.json');
     await page.click('[data-tab="' + k + '"]');
     await page.setInputFiles('#file', 'tests/sample/' + f + '.jpg');
     await page.waitForFunction((k) => state.photos[k].bitmap && !state.photos[k].faceBusy, k, { timeout: 60000 });
-    await page.evaluate(([k, r]) => { const p = state.photos[k]; p.ruler = r; changed(); }, [k, r]);
+    // Last visit has a ruler. This visit keeps the estimate and takes its scale from the last visit.
+    if (k === 'a') await page.evaluate(([k, r]) => { const p = state.photos[k]; p.scaleMode = 'ruler'; p.ruler = r; changed(); }, [k, r]);
+    console.log(k, 'area:', await page.textContent('#area-result'), '|', await page.textContent('#scale-result'));
     await page.click('#find');
     await page.waitForFunction(() => document.getElementById('find').textContent === 'Find moles');
     console.log(k, await page.textContent('#mole-count'), '|', await page.textContent('#lm-count'));
   }
   await page.click('[data-tab="compare"]');
   console.log(await page.textContent('#align'));
+  console.log((await page.$$eval('#table tbody tr', (t) => t.map((r) => r.innerText.replace(/\s+/g, ' ')))).join('\n'));
+  console.log('B scale from last visit:', await page.evaluate(() => { const r = compare(); return r.bFromLast + ' ' + r.sB.toFixed(2); }));
   console.log(await page.$$eval('.stat', (d) => d.map((x) => x.innerText.replace(/\n/g, ' ')).join(', ')));
   await page.click('[data-tab="a"]');
   await page.click('#face-find');

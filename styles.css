@@ -271,6 +271,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--cs-brand-go
 }
 .field input[type="range"] { width: 100%; accent-color: var(--cs-brand-gold); }
 .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+.seg3 button { font-size: 14px; }
 
 /* ---------- Compare ---------- */
 .missing { margin: 0 0 12px; padding: 0 0 0 18px; color: var(--cs-n-200); display: flex; flex-direction: column; gap: 6px; }
@@ -337,7 +339,8 @@ tr[data-status="out"] td.st { color: var(--cs-n-300); }
   .brand span { display: none; }
   .tabs { margin-left: 0; flex: 1; }
   .tabs button { flex: 1; padding: 6px 8px; }
-  .tool { padding: 0 9px; font-size: 13px; min-height: 34px; }
+  .tool { padding: 0 7px; font-size: 13px; min-height: 34px; }
+  .tools { flex-wrap: wrap; }
   .status { font-size: 13px; padding: 6px 10px; }
 }
 @media (max-width: 400px) {

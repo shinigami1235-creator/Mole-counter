@@ -45,6 +45,7 @@
 
     <div class="toolbar" id="toolbar">
       <div class="tools" id="tools">
+        <button type="button" class="tool" data-tool="area">Area</button>
         <button type="button" class="tool" data-tool="ruler">Ruler</button>
         <button type="button" class="tool" data-tool="landmark">Landmark</button>
         <button type="button" class="tool" data-tool="add">Add mole</button>
@@ -70,13 +71,32 @@
       </section>
 
       <section class="step">
-        <h3><span class="num">2</span>Scale</h3>
-        <div class="seg" id="scale-seg">
+        <h3><span class="num">2</span>Area</h3>
+        <p class="result" id="area-result"></p>
+        <p class="hint">Moles are only looked for inside the area, and everything outside it is dimmed. A face photo uses the face without the eyes, brows, lips and nostrils. Other photos use the skin.</p>
+        <p class="hint">To fix it, drag over the photo with the Area tool. Add paints skin in and Erase takes it out.</p>
+        <div class="seg" id="brush-seg">
+          <button type="button" data-brush="add">Add</button>
+          <button type="button" data-brush="erase">Erase</button>
+        </div>
+        <div class="row2">
+          <button type="button" class="btn" id="area-again">Find area again</button>
+          <button type="button" class="btn" id="area-whole">Whole photo</button>
+        </div>
+      </section>
+
+      <section class="step">
+        <h3><span class="num">3</span>Scale</h3>
+        <div class="seg seg3" id="scale-seg">
+          <button type="button" data-scale="estimate">Estimate</button>
           <button type="button" data-scale="ruler">Ruler</button>
           <button type="button" data-scale="landmarks">Landmarks</button>
         </div>
+        <div id="scale-estimate">
+          <p class="hint" id="estimate-note"></p>
+        </div>
         <div id="scale-ruler">
-          <p class="hint">Tap two marks on the ruler with the Ruler tool.</p>
+          <p class="hint">Drag the two marks onto the ruler with the Ruler tool, then type the distance between them.</p>
           <label class="field">Distance between the marks (mm)
             <input id="ruler-mm" type="number" inputmode="decimal" min="0.1" step="0.1">
           </label>
@@ -92,7 +112,7 @@
       </section>
 
       <section class="step">
-        <h3><span class="num">3</span>Landmarks</h3>
+        <h3><span class="num">4</span>Landmarks</h3>
         <p class="hint">A face photo gets 6 landmarks on its own. Other segments are lined up on the moles themselves when a photo has no landmarks.</p>
         <p class="hint">To add your own, tap fixed points with the Landmark tool, such as ink dots, the nipples or a scar, in the same order on both photos.</p>
         <p class="result" id="lm-count"></p>
@@ -103,7 +123,7 @@
       </section>
 
       <section class="step">
-        <h3><span class="num">4</span>Moles</h3>
+        <h3><span class="num">5</span>Moles</h3>
         <label class="field"><span>Sensitivity <output id="sens-out"></output></span>
           <input id="sens" type="range" min="1" max="10" step="1">
         </label>
@@ -116,9 +136,13 @@
           </label>
         </div>
         <button type="button" class="btn primary" id="find">Find moles</button>
-        <p class="hint" id="find-hint">Set the scale first since mole sizes are in mm.</p>
         <p class="result" id="mole-count"></p>
-        <p class="hint">Tap a missed mole with Add mole. Tap a freckle, hair or shadow with Remove mole.</p>
+        <div class="row3" id="review">
+          <button type="button" class="btn" id="mole-prev">Previous</button>
+          <button type="button" class="btn" id="mole-drop">Remove</button>
+          <button type="button" class="btn" id="mole-next">Next</button>
+        </div>
+        <p class="hint">Previous and Next zoom in on each mole in turn. Tap a missed mole with Add mole.</p>
       </section>
     </div>
 

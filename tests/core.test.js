@@ -98,6 +98,41 @@ check('affine round trip', Math.hypot(rt[0] - 123, rt[1] - 456) < 1e-6);
   check('too few moles returns nothing', M.alignByMoles(ptsA.slice(0, 2), ptsB, 1, 30) === null);
 }
 
+
+// Area masks
+{
+  const w = 200, h = 150;
+  const m = new Uint8Array(w * h);
+  M.fillPolygon(m, w, h, [[50, 30], [150, 30], [150, 120], [50, 120]], 1);
+  let n = 0; for (const v of m) n += v;
+  check('polygon fill covers its area', Math.abs(n - 100 * 90) < 200, String(n));
+  M.fillPolygon(m, w, h, M.scalePolygon([[90, 60], [110, 60], [110, 80], [90, 80]], 1.5), 0);
+  let n2 = 0; for (const v of m) n2 += v;
+  check('cut-out removes the eye area', Math.abs((n - n2) - 30 * 30) < 120, String(n - n2));
+  const holed = new Uint8Array(w * h);
+  M.fillPolygon(holed, w, h, [[20, 20], [180, 20], [180, 130], [20, 130]], 1);
+  M.fillPolygon(holed, w, h, [[60, 60], [70, 60], [70, 70], [60, 70]], 0);
+  const filled = M.fillHoles(holed, w, h);
+  check('a mole-sized hole is filled', filled[65 * w + 65] === 1 && filled[5 * w + 5] === 0);
+  const two = new Uint8Array(w * h);
+  M.fillPolygon(two, w, h, [[10, 10], [100, 10], [100, 140], [10, 140]], 1);
+  M.fillPolygon(two, w, h, [[150, 10], [155, 10], [155, 15], [150, 15]], 1);
+  const kept = M.keepLarge(two, w, h, 0.25);
+  check('a speck far from the subject is dropped', kept[12 * w + 152] === 0 && kept[50 * w + 50] === 1);
+  // skin by colour: skin-toned square on a grey-blue room
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const j = (y * w + x) * 4;
+    const skin = x > 60 && x < 140 && y > 20 && y < 140;
+    const mole = Math.hypot(x - 100, y - 80) < 4;
+    const c = mole ? [90, 60, 45] : skin ? [214, 168, 140] : [120, 130, 150];
+    rgba[j] = c[0]; rgba[j + 1] = c[1]; rgba[j + 2] = c[2]; rgba[j + 3] = 255;
+  }
+  const sk = M.skinByColour(rgba, w, h, 0.05);
+  check('skin found by colour, background left out', sk && sk[80 * w + 100] === 1 && sk[80 * w + 20] === 0, sk ? 'ok' : 'none');
+  check('mask bounds', JSON.stringify(M.maskBounds(sk, w, h)) === JSON.stringify([61, 21, 140, 140]), JSON.stringify(M.maskBounds(sk, w, h)));
+}
+
 // Speed at full working size
 const big = makeSkin(3000, 2250, 8, truth.map((m) => Object.assign({}, m, { x: m.x * 2.5, y: m.y * 2.5 })));
 t0 = Date.now();

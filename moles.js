@@ -522,10 +522,145 @@
     return { T, inliers: from.length, rms: Math.sqrt(ss / from.length) };
   }
 
+  // ------------------------------------------------------------------
+  // Area masks: 1 where moles are looked for, 0 outside.
+  // ------------------------------------------------------------------
+
+  // Sets every pixel inside the polygon to `value` (even-odd scanline fill).
+  function fillPolygon(mask, w, h, pts, value) {
+    if (pts.length < 3) return;
+    let minY = h, maxY = 0;
+    for (const p of pts) { minY = Math.min(minY, p[1]); maxY = Math.max(maxY, p[1]); }
+    minY = Math.max(0, Math.floor(minY)); maxY = Math.min(h - 1, Math.ceil(maxY));
+    const xs = [];
+    for (let y = minY; y <= maxY; y++) {
+      const yc = y + 0.5;
+      xs.length = 0;
+      for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+        const [x1, y1] = pts[j], [x2, y2] = pts[i];
+        if ((y1 <= yc && y2 > yc) || (y2 <= yc && y1 > yc)) xs.push(x1 + (yc - y1) / (y2 - y1) * (x2 - x1));
+      }
+      xs.sort((a, b) => a - b);
+      for (let k = 0; k + 1 < xs.length; k += 2) {
+        const x0 = Math.max(0, Math.ceil(xs[k] - 0.5)), x1 = Math.min(w - 1, Math.floor(xs[k + 1] - 0.5));
+        for (let x = x0; x <= x1; x++) mask[y * w + x] = value;
+      }
+    }
+  }
+
+  // Grows or shrinks a polygon about its centre.
+  function scalePolygon(pts, f) {
+    let cx = 0, cy = 0;
+    for (const p of pts) { cx += p[0]; cy += p[1]; }
+    cx /= pts.length; cy /= pts.length;
+    return pts.map((p) => [cx + (p[0] - cx) * f, cy + (p[1] - cy) * f]);
+  }
+
+  // Labels 4-connected regions of 1s. Returns { labels, sizes } with labels
+  // starting at 1.
+  function components(mask, w, h) {
+    const labels = new Int32Array(w * h);
+    const sizes = [0];
+    const stack = new Int32Array(w * h);
+    let next = 1;
+    for (let s = 0; s < w * h; s++) {
+      if (!mask[s] || labels[s]) continue;
+      let sp = 0, n = 0;
+      stack[sp++] = s; labels[s] = next;
+      while (sp > 0) {
+        const k = stack[--sp]; n++;
+        const x = k % w, y = (k / w) | 0;
+        if (x > 0 && mask[k - 1] && !labels[k - 1]) { labels[k - 1] = next; stack[sp++] = k - 1; }
+        if (x < w - 1 && mask[k + 1] && !labels[k + 1]) { labels[k + 1] = next; stack[sp++] = k + 1; }
+        if (y > 0 && mask[k - w] && !labels[k - w]) { labels[k - w] = next; stack[sp++] = k - w; }
+        if (y < h - 1 && mask[k + w] && !labels[k + w]) { labels[k + w] = next; stack[sp++] = k + w; }
+      }
+      sizes.push(n);
+      next++;
+    }
+    return { labels, sizes };
+  }
+
+  // Keeps regions at least `minShare` of the biggest one.
+  function keepLarge(mask, w, h, minShare) {
+    const { labels, sizes } = components(mask, w, h);
+    const biggest = Math.max(0, ...sizes);
+    const out = new Uint8Array(w * h);
+    if (!biggest) return out;
+    for (let k = 0; k < w * h; k++) if (labels[k] && sizes[labels[k]] >= biggest * minShare) out[k] = 1;
+    return out;
+  }
+
+  // Fills holes: 0s the edge of the image cannot reach become 1. A dark mole
+  // the skin finder skipped sits in such a hole.
+  function fillHoles(mask, w, h) {
+    const inv = new Uint8Array(w * h);
+    for (let k = 0; k < w * h; k++) inv[k] = mask[k] ? 0 : 1;
+    const { labels } = components(inv, w, h);
+    const outside = new Set();
+    for (let x = 0; x < w; x++) { outside.add(labels[x]); outside.add(labels[(h - 1) * w + x]); }
+    for (let y = 0; y < h; y++) { outside.add(labels[y * w]); outside.add(labels[y * w + w - 1]); }
+    const out = new Uint8Array(w * h);
+    for (let k = 0; k < w * h; k++) out[k] = mask[k] || !outside.has(labels[k]) ? 1 : 0;
+    return out;
+  }
+
+  function dilate(mask, w, h, r) {
+    if (r <= 0) return mask;
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!mask[y * w + x]) continue;
+        for (let dy = -r; dy <= r; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= h) continue;
+          for (let dx = -r; dx <= r; dx++) {
+            const xx = x + dx;
+            if (xx >= 0 && xx < w && dx * dx + dy * dy <= r * r) out[yy * w + xx] = 1;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  // Skin by colour, for photos the person finder cannot read. Keeps the
+  // big skin regions and fills the holes moles leave in them. Returns null
+  // when under `minShare` of the photo looks like skin.
+  function skinByColour(rgba, w, h, minShare) {
+    const m = new Uint8Array(w * h);
+    let n = 0;
+    for (let k = 0, j = 0; k < w * h; k++, j += 4) {
+      const r = rgba[j], g = rgba[j + 1], b = rgba[j + 2];
+      const y = 0.299 * r + 0.587 * g + 0.114 * b;
+      const cb = 128 - 0.1687 * r - 0.3313 * g + 0.5 * b;
+      const cr = 128 + 0.5 * r - 0.4187 * g - 0.0813 * b;
+      if (y > 45 && cr >= 133 && cr <= 180 && cb >= 77 && cb <= 135 && r > b) { m[k] = 1; n++; }
+    }
+    if (n < w * h * (minShare || 0.05)) return null;
+    const kept = fillHoles(keepLarge(m, w, h, 0.25), w, h);
+    let left = 0;
+    for (let k = 0; k < w * h; k++) left += kept[k];
+    return left >= w * h * (minShare || 0.05) ? kept : null;
+  }
+
+  function maskBounds(mask, w, h) {
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (!mask[y * w + x]) continue;
+        if (x < x0) x0 = x; if (x > x1) x1 = x;
+        if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+    }
+    return x1 < 0 ? null : [x0, y0, x1 + 1, y1 + 1];
+  }
+
   const api = {
     brightness, boxMean, skinBackground, sampleBackground, dropForSensitivity,
     segmentFromSeed, segmentAt, measureMask, convexHull, eqDiameter, detect,
     fitTransform, applyTransform, invertTransform, matchMoles, alignByMoles,
+    fillPolygon, scalePolygon, components, keepLarge, fillHoles, dilate, skinByColour, maskBounds,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MoleCore = api;

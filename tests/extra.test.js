@@ -7,9 +7,9 @@ const truth = require('./sample/truth.json');
   await page.goto('http://localhost:8765/index.html');
   for (const [k, f, r, l] of [['a', 'visit-a', truth.rulerA, truth.landmarksA], ['b', 'visit-b', truth.rulerB, truth.landmarksB]]) {
     await page.click('[data-tab="' + k + '"]');
-    await page.setInputFiles('#file', 'tests/out/' + f + '.jpg');
-    await page.waitForFunction((k) => state.photos[k].bitmap, k);
-    await page.evaluate(([k, r, l]) => { const p = state.photos[k]; p.ruler = r; p.landmarks = l; changed(); }, [k, r, l]);
+    await page.setInputFiles('#file', 'tests/sample/' + f + '.jpg');
+    await page.waitForFunction((k) => state.photos[k].bitmap && !state.photos[k].faceBusy, k, { timeout: 60000 });
+    await page.evaluate(([k, r, l]) => { const p = state.photos[k]; p.scaleMode = 'ruler'; p.ruler = r; p.landmarks = l; changed(); }, [k, r, l]);
     await page.click('#find');
     await page.waitForFunction(() => document.getElementById('find').textContent === 'Find moles');
   }

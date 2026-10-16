@@ -3,7 +3,7 @@
 // The app files are served network-first so a fix pushed to GitHub Pages
 // reaches the next page load, with the cached copy used when offline.
 // Icons are served cache-first. Bump CACHE_NAME on every deploy.
-const CACHE_NAME = 'mole-counter-v4';
+const CACHE_NAME = 'mole-counter-v5';
 const FACE_CACHE = 'mole-counter-face-0.10.18';   // kept across deploys
 const APP_SHELL = [
   './',
@@ -23,7 +23,7 @@ const APP_SHELL = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then((cache) => cache.addAll(APP_SHELL.map((u) => new Request(u, { cache: 'reload' }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -74,8 +74,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // no-cache makes the browser check GitHub for a newer copy instead of
+  // serving the one it kept for up to 10 minutes.
   event.respondWith(
-    fetch(event.request).then((response) => {
+    fetch(event.request, { cache: 'no-cache' }).then((response) => {
       if (response.ok) {
         const clone = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));

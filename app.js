@@ -420,6 +420,10 @@ function setFaceArea(p, mesh) {
   const at = (i) => [mesh[i][0] * a.k, mesh[i][1] * a.k];
   C.fillPolygon(a.data, a.w, a.h, FACE_OVAL.map(at), 1);
   for (const [idx, grow] of FACE_HOLES) C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(idx.map(at), grow), 0);
+  // Hair falling over the face is not skin to the person finder.
+  if (p.skinArea && p.skinArea.w === a.w) {
+    for (let i = 0; i < a.data.length; i++) a.data[i] &= p.skinArea.data[i];
+  }
   p.area = a;
   p.areaSource = 'face';
   p.areaOverlay = null;
@@ -623,7 +627,11 @@ function readSkin(seg, p) {
   let n = 0;
   for (let i = 0; i < w * h; i++) if (cat[i] === 2 || cat[i] === 3) { m[i] = 1; n++; }
   if (n < w * h * 0.03) return null;
-  const out = C.dilate(C.fillHoles(C.keepLarge(m, w, h, 0.05), w, h), w, h, 1);
+  // Holes up to about 15 mm across are filled (a mole the finder read as
+  // not-skin); bigger ones, such as hair over the forehead, stay out.
+  const s = pxPerMm(p) || Math.max(p.W, p.H) / ROUGH_MM;
+  const holeMax = Math.PI / 4 * (15 * s * k) ** 2;
+  const out = C.dilate(C.fillHoles(C.keepLarge(m, w, h, 0.05), w, h, holeMax), w, h, 1);
   return { w, h, k, data: out };
 }
 
@@ -643,7 +651,7 @@ async function analysePhoto(p, onLoad) {
       if (p.bitmap !== bitmap) return;
       mesh = readFace(det, p);
     } catch (e) { offline = true; }
-    if (!mesh && !offline) {
+    if (!offline) {
       try {
         const seg = await loadSegmenter();
         if (p.bitmap !== bitmap) return;
@@ -663,6 +671,7 @@ async function analysePhoto(p, onLoad) {
     }
     p.faceMesh = mesh;
     p.irisPx = irisWidth(mesh);
+    if (skin) p.skinArea = skin;
     if (!p.areaEdited) setFaceArea(p, mesh);
   } else if (skin) p.skinArea = skin;
   if (!mesh && skin && !p.areaEdited) {

@@ -3,7 +3,7 @@
 // The app files are served network-first so a fix pushed to GitHub Pages
 // reaches the next page load, with the cached copy used when offline.
 // Icons are served cache-first. Bump CACHE_NAME on every deploy.
-const CACHE_NAME = 'mole-counter-v6';
+const CACHE_NAME = 'mole-counter-v7';
 const FACE_CACHE = 'mole-counter-face-0.10.18';   // kept across deploys
 const APP_SHELL = [
   './',

@@ -614,16 +614,20 @@
   }
 
   // Fills holes: 0s the edge of the image cannot reach become 1. A dark mole
-  // the skin finder skipped sits in such a hole.
-  function fillHoles(mask, w, h) {
+  // the skin finder skipped sits in such a hole. With `maxSize`, only holes
+  // up to that many pixels are filled, so a lock of hair stays out.
+  function fillHoles(mask, w, h, maxSize) {
     const inv = new Uint8Array(w * h);
     for (let k = 0; k < w * h; k++) inv[k] = mask[k] ? 0 : 1;
-    const { labels } = components(inv, w, h);
+    const { labels, sizes } = components(inv, w, h);
     const outside = new Set();
     for (let x = 0; x < w; x++) { outside.add(labels[x]); outside.add(labels[(h - 1) * w + x]); }
     for (let y = 0; y < h; y++) { outside.add(labels[y * w]); outside.add(labels[y * w + w - 1]); }
     const out = new Uint8Array(w * h);
-    for (let k = 0; k < w * h; k++) out[k] = mask[k] || !outside.has(labels[k]) ? 1 : 0;
+    for (let k = 0; k < w * h; k++) {
+      const l = labels[k];
+      out[k] = mask[k] || (!outside.has(l) && (!maxSize || sizes[l] <= maxSize)) ? 1 : 0;
+    }
     return out;
   }
 

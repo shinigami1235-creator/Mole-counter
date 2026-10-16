@@ -344,7 +344,7 @@ function buildCompare() {
 // ---------------------------------------------------------------------
 function pushHistory(p) {
   p.history.push({ ruler: p.ruler.map((q) => q.slice()), landmarks: p.landmarks.map((q) => q.slice()), moles: p.moles.slice(),
-    face: p.faceLandmarks, area: p.area, areaSource: p.areaSource, areaEdited: p.areaEdited });
+    face: p.faceLandmarks, area: p.area, areaShell: p.areaShell, areaSource: p.areaSource, areaEdited: p.areaEdited });
   if (p.history.length > 60) p.history.shift();
 }
 function undo() {
@@ -352,7 +352,7 @@ function undo() {
   if (!p || !p.history.length) return;
   const h = p.history.pop();
   p.ruler = h.ruler; p.landmarks = h.landmarks; p.moles = h.moles; p.faceLandmarks = h.face;
-  p.area = h.area; p.areaSource = h.areaSource; p.areaEdited = h.areaEdited; p.areaOverlay = null;
+  p.area = h.area; p.areaShell = h.areaShell; p.areaSource = h.areaSource; p.areaEdited = h.areaEdited; p.areaOverlay = null;
   changed();
 }
 
@@ -441,6 +441,7 @@ function blankArea(p) {
 }
 
 function setColourArea(p) {
+  p.areaShell = null;
   const { w, h, k } = p.areaDims;
   const m = C.skinByColour(p.areaRgba, w, h, 0.05);
   if (m) { p.area = { w, h, k, data: m }; p.areaSource = 'colour'; }
@@ -461,17 +462,26 @@ function setFaceArea(p, mesh) {
     return y < eyeY ? [x, eyeY - (eyeY - y) * 1.8] : [x, y];
   });
   C.fillPolygon(a.data, a.w, a.h, oval, 1);
-  for (const [idx, grow] of FACE_HOLES) C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(idx.map(at), grow), 0);
   // Hair falling over the face is not skin to the person finder.
   if (p.skinArea && p.skinArea.w === a.w) {
     for (let i = 0; i < a.data.length; i++) a.data[i] &= p.skinArea.data[i];
   }
+  // The shell is the area with the eyes, brows, lips and nostrils kept in.
+  // Only what lies outside it is dimmed on screen.
+  const shell = a.data.slice();
+  for (const [idx, grow] of FACE_HOLES) {
+    const poly = C.scalePolygon(idx.map(at), grow);
+    C.fillPolygon(a.data, a.w, a.h, poly, 0);
+    C.fillPolygon(shell, a.w, a.h, poly, 1);
+  }
+  p.areaShell = C.fillHoles(shell, a.w, a.h);
   p.area = a;
   p.areaSource = 'face';
   p.areaOverlay = null;
 }
 
 function setWholeArea(p) {
+  p.areaShell = null;
   p.area = null;
   p.areaSource = 'whole';
   p.areaOverlay = null;
@@ -522,7 +532,7 @@ function areaOverlay(p) {
   if (!p.area) return null;
   if (p.areaOverlay) return p.areaOverlay;
   const { w, h } = p.area;
-  const data = C.fillHoles(p.area.data, w, h);
+  const data = p.areaShell && p.areaShell.length === w * h ? p.areaShell : C.fillHoles(p.area.data, w, h);
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   const g = cv.getContext('2d');
@@ -731,6 +741,7 @@ async function analysePhoto(p, onLoad) {
     if (!p.areaEdited) setFaceArea(p, mesh);
   } else if (skin) p.skinArea = skin;
   if (!mesh && skin && !p.areaEdited) {
+    p.areaShell = null;
     p.area = skin;
     p.areaSource = 'skin';
     p.areaOverlay = null;
@@ -1216,6 +1227,7 @@ function placeRulerMarks(p, sNow) {
 // outside it are dropped.
 function finishPaint(p) {
   gesture = { type: 'none' };
+  p.areaShell = null;
   p.areaSource = 'painted';
   p.areaEdited = true;
   trimToArea(p);
@@ -1732,7 +1744,7 @@ function wire() {
     pushHistory(p);
     p.areaEdited = false;
     if (p.faceMesh) setFaceArea(p, p.faceMesh);
-    else if (p.skinArea) { p.area = p.skinArea; p.areaSource = 'skin'; p.areaOverlay = null; }
+    else if (p.skinArea) { p.area = p.skinArea; p.areaShell = null; p.areaSource = 'skin'; p.areaOverlay = null; }
     else setColourArea(p);
     zoomToArea(p);
     changed();

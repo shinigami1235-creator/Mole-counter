@@ -45,7 +45,7 @@ const FACE_HOLES = [
   [[46, 53, 52, 65, 55, 107, 66, 105, 63, 70], 1.3],                                                // right brow
   [[276, 283, 282, 295, 285, 336, 296, 334, 293, 300], 1.3],                                        // left brow
   [[61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185], 1.15], // lips
-  [[129, 4, 358, 327, 2, 98], 1.15],                                                                // nostrils
+  [[98, 97, 2, 326, 327, 294, 278, 344, 440, 275, 4, 45, 220, 115, 48, 64], 1.1],                 // nose base and nostrils
 ];
 // Visible iris width in adults, the usual stand-in for a ruler on a face.
 const IRIS_MM = 11.7;
@@ -415,7 +415,7 @@ function setColourArea(p) {
 function setFaceArea(p, mesh) {
   const a = blankArea(p);
   const at = (i) => [mesh[i][0] * a.k, mesh[i][1] * a.k];
-  C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(FACE_OVAL.map(at), 1.03), 1);
+  C.fillPolygon(a.data, a.w, a.h, FACE_OVAL.map(at), 1);
   for (const [idx, grow] of FACE_HOLES) C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(idx.map(at), grow), 0);
   p.area = a;
   p.areaSource = 'face';
@@ -434,6 +434,20 @@ function inArea(p, x, y) {
   const ax = Math.floor(x * a.k), ay = Math.floor(y * a.k);
   if (ax < 0 || ay < 0 || ax >= a.w || ay >= a.h) return false;
   return a.data[ay * a.w + ax] === 1;
+}
+
+// True when a found spot sits inside the area with 1 mm of area all round
+// it. A shadow along the jaw or the hairline straddles the edge and fails.
+function clearOfAreaEdge(p, m, s) {
+  if (!inArea(p, m.cx, m.cy)) return false;
+  if (!p.area) return true;
+  const r = m.feret / 2 + s;
+  let inside = 0;
+  for (let i = 0; i < 16; i++) {
+    const t = i * Math.PI / 8;
+    if (inArea(p, m.cx + r * Math.cos(t), m.cy + r * Math.sin(t))) inside++;
+  }
+  return inside >= 15;
 }
 
 // Drops moles that sit outside the area.
@@ -690,7 +704,7 @@ async function findMoles() {
     // An ink dot under a landmark is skipped as a mole.
     const onLandmark = (m) => p.landmarks.some((q) => dist(q, [m.cx, m.cy]) < Math.max(1.5 * s, m.feret / 2));
     const auto = found.map((m) => toMole(p, m, false))
-      .filter((m) => inArea(p, m.cx, m.cy))
+      .filter((m) => clearOfAreaEdge(p, m, s))
       .filter((m) => !onLandmark(m))
       .filter((m) => !manual.some((q) => dist([q.cx, q.cy], [m.cx, m.cy]) < Math.max(q.feret, m.feret) / 2));
     p.moles = manual.concat(auto);

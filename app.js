@@ -695,7 +695,7 @@ async function findMoles() {
   if (!s) return;
   dom.find.textContent = 'Finding';
   dom.find.disabled = true;
-  await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 30)));
+  await new Promise((r) => setTimeout(r, 50));
   try {
     const st = state.settings;
     const found = C.detect(p.v, p.ww, p.wh, { pxPerMm: s * p.ws, minMm: st.minMm, maxMm: st.maxMm, sensitivity: st.sensitivity });

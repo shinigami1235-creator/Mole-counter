@@ -11,6 +11,10 @@ const MAX_LANDMARKS = 12;
 const HANDLE_HIT_PX = 24;       // screen pixels around a ruler mark or landmark that grab it
 const MOLE_HIT_PX = 16;
 const OVER_MM = 6;              // the D in ABCDE
+// A spot on one photo only that is less than 18% darker than the skin is
+// listed as Faint rather than New or Gone. On two photos taken the same
+// day, every unpaired spot under this was a fold, pore or hair edge.
+const FAINT_CONTRAST = 0.18;
 
 // Face landmarks come from MediaPipe, the same build Cygnus Measure uses.
 const MP_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18';
@@ -40,10 +44,10 @@ const SEG_MODEL = 'https://storage.googleapis.com/mediapipe-models/image_segment
 const FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377,
   152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109];
 const FACE_HOLES = [
-  [[33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246], 1.3],           // right eye
-  [[263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466], 1.3],        // left eye
-  [[46, 53, 52, 65, 55, 107, 66, 105, 63, 70], 1.1],                                                // right brow
-  [[276, 283, 282, 295, 285, 336, 296, 334, 293, 300], 1.1],                                        // left brow
+  [[33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246], 1.45],          // right eye
+  [[263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385, 386, 387, 388, 466], 1.45],       // left eye
+  [[46, 53, 52, 65, 55, 107, 66, 105, 63, 70], 1.3],                                                // right brow
+  [[276, 283, 282, 295, 285, 336, 296, 334, 293, 300], 1.3],                                        // left brow
   [[61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185], 1.05], // lips
   [[48, 64, 98, 97, 2, 326, 327, 294, 278], 1.0],                                                   // nostrils
 ];
@@ -65,11 +69,12 @@ const COLORS = {
   new: '#D17BFF',
   gone: '#FFFFFF',
   out: '#AEB7C4',
+  faint: '#AEB7C4',
   selected: '#FFFFFF',
 };
 
 const STATUS_WORD = {
-  same: 'Same', grown: 'Grown', shrunk: 'Shrunk', new: 'New', gone: 'Gone', out: 'Not in frame',
+  same: 'Same', grown: 'Grown', shrunk: 'Shrunk', new: 'New', gone: 'Gone', out: 'Not in frame', faint: 'Faint',
 };
 
 function newPhoto(key) {
@@ -184,6 +189,32 @@ function alignVisits() {
   return { T: res.T, n: 0, residualMm: null, byMoles: { inliers: res.inliers, rmsMm: res.rms / sA } };
 }
 
+// Point maps between the two photos. With a face map on both, each point
+// is carried by an affine fit to the 12 nearest face-map points, which
+// follows a turned head or a smile far better than one fit for the whole
+// face. Otherwise the alignment from alignVisits is used everywhere.
+const MESH_NEAR = 12;
+function localMap(fromMesh, toMesh) {
+  const n = Math.min(468, fromMesh.length, toMesh.length);
+  return (x, y) => {
+    const near = [];
+    for (let i = 0; i < n; i++) {
+      const d = (fromMesh[i][0] - x) ** 2 + (fromMesh[i][1] - y) ** 2;
+      if (near.length < MESH_NEAR) { near.push([d, i]); near.sort((a, b) => a[0] - b[0]); }
+      else if (d < near[MESH_NEAR - 1][0]) { near[MESH_NEAR - 1] = [d, i]; near.sort((a, b) => a[0] - b[0]); }
+    }
+    const T = C.fitTransform(near.map(([, i]) => fromMesh[i]), near.map(([, i]) => toMesh[i]));
+    return C.applyTransform(T, x, y);
+  };
+}
+function visitMaps(al) {
+  if (A.faceMesh && B.faceMesh && A.faceMesh.length >= 468 && B.faceMesh.length >= 468) {
+    return { toA: localMap(B.faceMesh, A.faceMesh), toB: localMap(A.faceMesh, B.faceMesh) };
+  }
+  const Tinv = C.invertTransform(al.T);
+  return { toA: (x, y) => C.applyTransform(al.T, x, y), toB: (x, y) => C.applyTransform(Tinv, x, y) };
+}
+
 // How far apart the two photo scales may be when lining up on moles. A
 // rough estimate can be far off, an iris estimate a little.
 function scaleSlack() {
@@ -234,6 +265,7 @@ function buildCompare() {
   if (al.error) return { missing: [al.error] };
   const { T, residualMm, n, byMoles } = al;
   const Tinv = C.invertTransform(T);
+  const maps = visitMaps(al);
 
   // An estimated scale on this visit is replaced by the last visit's scale
   // carried across the alignment, since that holds both visits to one ruler.
@@ -250,7 +282,7 @@ function buildCompare() {
   }
 
   const numbers = numberLastVisit();
-  const mapped = B.moles.map((m) => C.applyTransform(T, m.cx, m.cy));
+  const mapped = B.moles.map((m) => maps.toA(m.cx, m.cy));
   const pairs = C.matchMoles(A.moles.map((m) => [m.cx, m.cy]), mapped, state.settings.matchMm * sA);
   const byLast = new Map(pairs.map((p) => [p.last, p.now]));
   const usedNow = new Set(pairs.map((p) => p.now));
@@ -270,9 +302,9 @@ function buildCompare() {
       row.pct = (now.d / last.d - 1) * 100;
       row.status = row.change >= g ? 'grown' : row.change <= -g ? 'shrunk' : 'same';
     } else {
-      const [bx, by] = C.applyTransform(Tinv, m.cx, m.cy);
+      const [bx, by] = maps.toB(m.cx, m.cy);
       const inside = bx >= margin && by >= margin && bx <= B.W - margin && by <= B.H - margin;
-      row.status = inside ? 'gone' : 'out';
+      row.status = !inside ? 'out' : m.contrast < FAINT_CONTRAST ? 'faint' : 'gone';
       row.posB = [bx, by];
     }
     rows.push(row);
@@ -281,11 +313,13 @@ function buildCompare() {
   const bandB = 12 * sB;
   const fresh = B.moles.filter((m, j) => !usedNow.has(j)).sort((m, k) =>
     (Math.floor(m.cy / bandB) - Math.floor(k.cy / bandB)) || (m.cx - k.cx));
+  let nNew = 0, nFaint = 0;
   fresh.forEach((m, k) => {
     const now = mmB(m);
-    const posA = C.applyTransform(T, m.cx, m.cy);
-    rows.push({ key: 'b' + m.id, label: 'N' + (k + 1), a: null, b: m, nowMm: now.d, nowArea: now.area,
-      status: 'new', posA, sort: 100000 + k });
+    const posA = maps.toA(m.cx, m.cy);
+    const faint = m.contrast < FAINT_CONTRAST;
+    rows.push({ key: 'b' + m.id, label: faint ? 'F' + (++nFaint) : 'N' + (++nNew), a: null, b: m, nowMm: now.d, nowArea: now.area,
+      status: faint ? 'faint' : 'new', posA, sort: (faint ? 200000 : 100000) + k });
   });
 
   for (const r of rows) {
@@ -293,7 +327,7 @@ function buildCompare() {
     r.over = size > OVER_MM;
   }
 
-  const stats = { last: A.moles.length, now: B.moles.length, new: 0, gone: 0, grown: 0, shrunk: 0, out: 0, same: 0 };
+  const stats = { last: A.moles.length, now: B.moles.length, new: 0, gone: 0, grown: 0, shrunk: 0, out: 0, same: 0, faint: 0 };
   for (const r of rows) stats[r.status]++;
 
   const labelOfB = new Map();
@@ -418,7 +452,15 @@ function setColourArea(p) {
 function setFaceArea(p, mesh) {
   const a = blankArea(p);
   const at = (i) => [mesh[i][0] * a.k, mesh[i][1] * a.k];
-  C.fillPolygon(a.data, a.w, a.h, FACE_OVAL.map(at), 1);
+  // The face map's outline stops partway up the forehead. Points above the
+  // eyes are pushed up to 1.8 times their height over the eye line, and
+  // the skin finder then cuts the area back to the hairline.
+  const eyeY = (mesh[33][1] + mesh[263][1]) / 2 * a.k;
+  const oval = FACE_OVAL.map((i) => {
+    const [x, y] = at(i);
+    return y < eyeY ? [x, eyeY - (eyeY - y) * 1.8] : [x, y];
+  });
+  C.fillPolygon(a.data, a.w, a.h, oval, 1);
   for (const [idx, grow] of FACE_HOLES) C.fillPolygon(a.data, a.w, a.h, C.scalePolygon(idx.map(at), grow), 0);
   // Hair falling over the face is not skin to the person finder.
   if (p.skinArea && p.skinArea.w === a.w) {
@@ -672,6 +714,20 @@ async function analysePhoto(p, onLoad) {
     p.faceMesh = mesh;
     p.irisPx = irisWidth(mesh);
     if (skin) p.skinArea = skin;
+    else {
+      // Without the person finder, skin is found by colour, with anything
+      // much darker than the cheeks (hair) left out.
+      const { w, h, k } = p.areaDims;
+      const ys = [];
+      for (const i of [50, 280, 101, 330, 205, 425]) {
+        const x = Math.round(mesh[i][0] * k), y = Math.round(mesh[i][1] * k);
+        const j = (y * w + x) * 4;
+        ys.push(0.299 * p.areaRgba[j] + 0.587 * p.areaRgba[j + 1] + 0.114 * p.areaRgba[j + 2]);
+      }
+      ys.sort((a, b) => a - b);
+      const m = C.skinByColour(p.areaRgba, w, h, 0.05, ys[ys.length >> 1] * 0.65);
+      p.skinArea = m ? { w, h, k, data: m } : null;
+    }
     if (!p.areaEdited) setFaceArea(p, mesh);
   } else if (skin) p.skinArea = skin;
   if (!mesh && skin && !p.areaEdited) {
@@ -733,34 +789,47 @@ async function findMoles(target) {
   changed();
 }
 
-// Looks again at every spot where the last visit had a mole and this
-// visit has none, since a faint mole the doctor added by hand last time
-// can sit under the detector's threshold. Returns how many it found.
+// Looks again at every spot where one photo has a mole and the other has
+// none, both ways round, since a faint mole can sit just under the
+// detector's threshold in one photo and just over it in the other. A spot
+// found this way is measured like any other. Returns how many were added
+// to this visit; the ones added to the last visit are counted on it.
 function findAtLastSpots(p) {
   if (p !== B || !A.moles.length) return 0;
   const al = alignVisits();
   if (al.error) return 0;
-  const Tinv = C.invertTransform(al.T);
-  const sB = pxPerMm(A) / Math.sqrt(Math.abs(al.T[0] * al.T[4] - al.T[1] * al.T[3]));
-  const tol = state.settings.matchMm * sB;
+  const maps = visitMaps(al);
+  const sA = pxPerMm(A);
+  const sB = sA / Math.sqrt(Math.abs(al.T[0] * al.T[4] - al.T[1] * al.T[3]));
+  const added = lookAgain(A, sA, B, sB, maps.toB);
+  A.guidedCount = (A.guidedCount || 0) + lookAgain(B, sB, A, sA, maps.toA);
+  return added;
+}
+
+function lookAgain(from, sFrom, to, sTo, map) {
+  const tol = state.settings.matchMm * sTo;
+  const spots = from.moles.map((m) => map(m.cx, m.cy));
+  const paired = new Set(C.matchMoles(spots, to.moles.map((m) => [m.cx, m.cy]), tol).map((p) => p.last));
   let added = 0;
-  for (const a of A.moles) {
-    const [x, y] = C.applyTransform(Tinv, a.cx, a.cy);
-    if (x < 0 || y < 0 || x >= p.W || y >= p.H || !inArea(p, x, y)) continue;
-    if (p.moles.some((m) => Math.hypot(m.cx - x, m.cy - y) < tol)) continue;
-    const lastMm = a.feret / pxPerMm(A);
-    // At least 8% darker than the skin and close to the old mole's contrast,
-    // so plain mottled skin where a mole has gone is left alone.
-    const m = C.segmentAt(p.v, p.ww, p.wh, x * p.ws, y * p.ws, {
-      pxPerMm: sB * p.ws, maxMm: Math.max(4, lastMm * 2 + 2), searchMm: Math.min(state.settings.matchMm / 2, 1.5),
+  for (let i = 0; i < from.moles.length; i++) {
+    if (paired.has(i)) continue;
+    const a = from.moles[i];
+    const [x, y] = spots[i];
+    if (x < 0 || y < 0 || x >= to.W || y >= to.H || !inArea(to, x, y)) continue;
+    const mm = a.feret / sFrom;
+    // At least 6% darker than the skin and close to the other photo's
+    // contrast, so plain mottled skin where a mole has gone is left alone.
+    const m = C.segmentAt(to.v, to.ww, to.wh, x * to.ws, y * to.ws, {
+      pxPerMm: sTo * to.ws, maxMm: Math.max(4, mm * 2 + 2), searchMm: Math.min(state.settings.matchMm, 3),
       minContrast: Math.max(0.08, a.contrast * 0.4),
     });
     if (!m) continue;
-    const mole = toMole(p, m, false);
-    const nowMm = mole.feret / sB;
-    if (Math.hypot(mole.cx - x, mole.cy - y) > tol || nowMm < lastMm * 0.4 || nowMm > lastMm * 2.5 + 1) continue;
+    const mole = toMole(to, m, false);
+    const got = mole.feret / sTo;
+    if (Math.hypot(mole.cx - x, mole.cy - y) > tol || got < mm * 0.4 || got > mm * 2.5 + 1) continue;
+    if (to.moles.some((m) => Math.hypot(m.cx - mole.cx, m.cy - mole.cy) < 0.7 * sTo)) continue;   // the same spot again
     mole.guided = true;
-    p.moles.push(mole);
+    to.moles.push(mole);
     added++;
   }
   return added;
@@ -1282,7 +1351,7 @@ function statusText() {
       const r = res.rows.find((q) => q.key === state.selected);
       if (r) return rowSentence(r);
     }
-    return 'Green same, red grown, blue shrunk, purple new, dashed gone. Tap a mole for its numbers.';
+    return 'Green same, red grown, blue shrunk, purple new, dashed gone, grey faint. Tap a mole for its numbers.';
   }
   if (!p.bitmap) return '';
   if (state.selected) {
@@ -1311,8 +1380,9 @@ function statusText() {
 }
 
 function rowSentence(r) {
-  const head = r.label.startsWith('N') ? 'New mole ' + r.label : 'Mole ' + r.label;
+  const head = r.label.startsWith('N') ? 'New mole ' + r.label : r.label.startsWith('F') ? 'Spot ' + r.label : 'Mole ' + r.label;
   switch (r.status) {
+    case 'faint': return head + ' is ' + fmt(r.nowMm != null ? r.nowMm : r.lastMm) + ' mm across and too faint to call, since it shows on one photo only.';
     case 'new': return head + ' is ' + fmt(r.nowMm) + ' mm across.';
     case 'gone': return head + ' was ' + fmt(r.lastMm) + ' mm across and is gone from this visit.';
     case 'out': return head + ' was ' + fmt(r.lastMm) + ' mm across and sits outside this visit\'s photo.';
@@ -1431,7 +1501,7 @@ function renderCompare() {
   const s = res.stats;
   const tiles = [
     ['Last visit', s.last], ['This visit', s.now], ['New', s.new], ['Gone', s.gone],
-    ['Grown', s.grown], ['Shrunk', s.shrunk], ['Not in frame', s.out],
+    ['Grown', s.grown], ['Shrunk', s.shrunk], ['Faint', s.faint], ['Not in frame', s.out],
   ];
   dom.stats.innerHTML = '';
   for (const [name, val] of tiles) {

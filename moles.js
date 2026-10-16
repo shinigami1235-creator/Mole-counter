@@ -128,7 +128,9 @@
     core.sort((a, b) => a - b);
     const coreV = core[Math.floor(core.length * 0.25)];
     if (ring - coreV < Math.max(4, ring * (opts.minContrast || 0.04))) return null;
-    const thr = (ring + coreV) / 2;
+    // The edge sits `level` of the way from the core to the skin, halfway
+    // unless a tighter level was asked for.
+    const thr = coreV + (ring - coreV) * (opts.level || 0.5);
 
     // Seed on the darkest pixel near the tap.
     let seed = -1, best = 256;
@@ -195,6 +197,20 @@
     return measureMask({ x0: x0 + minX, y0: y0 + minY, w: mw, h: mh, data }, { contrast: (ring - coreV) / ring });
   }
 
+  // Grows the region at the halfway level and, when it spills into a fold
+  // or a shadow beside the mole and comes out long, thin or lopsided, again
+  // at tighter levels until it is round and solid enough.
+  function segmentCompact(v, w, h, sx, sy, half, opts) {
+    let best = null;
+    for (const level of [0.5, 0.4, 0.3]) {
+      const m = segmentFromSeed(v, w, h, sx, sy, half, Object.assign({}, opts, { level }));
+      if (!m) break;
+      if (m.elong <= 2.2 && m.solidity >= 0.75) return m;
+      if (!best || m.elong / m.solidity < best.elong / best.solidity) best = m;
+    }
+    return best;
+  }
+
   function convexHull(pts) {
     pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
     const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
@@ -244,7 +260,11 @@
         if (d > feret) { feret = d; fa = hull[i]; fb = hull[j]; }
       }
     }
+    let hullArea = 0;
+    for (let i = 0, j = hull.length - 1; i < hull.length; j = i++) hullArea += hull[j][0] * hull[i][1] - hull[i][0] * hull[j][1];
+    hullArea = Math.abs(hullArea) / 2;
     return Object.assign({
+      solidity: hullArea > 0 ? Math.min(1, n / hullArea) : 1,
       cx: x0 + mx + 0.5,
       cy: y0 + my + 0.5,
       area: n,
@@ -327,7 +347,7 @@
     for (const c of candidates) {
       const sx = c.seed % w, sy = (c.seed / w) | 0;
       const half = Math.round(Math.max(c.bw, c.bh) * 1.2 + ppm * 1.5);
-      const m = segmentFromSeed(v, w, h, sx, sy, Math.min(half, Math.round(maxPx * 1.6)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: opts.minContrast || 0.08 });
+      const m = segmentCompact(v, w, h, sx, sy, Math.min(half, Math.round(maxPx * 1.6)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: opts.minContrast || 0.12 });
       if (!m) continue;
       const d = eqDiameter(m.area);
       if (d < minPx || d > maxPx) continue;
@@ -342,18 +362,23 @@
   // the tap and grows the region from there.
   function segmentAt(v, w, h, x, y, opts) {
     const ppm = opts.pxPerMm || 8;
-    const r = Math.max(2, Math.round(ppm * (opts.searchMm || 1)));
-    let bx = Math.round(x), by = Math.round(y), best = 256;
-    for (let yy = Math.max(0, by - r); yy <= Math.min(h - 1, by + r); yy++) {
-      for (let xx = Math.max(0, bx - r); xx <= Math.min(w - 1, bx + r); xx++) {
-        if ((xx - x) ** 2 + (yy - y) ** 2 > r * r) continue;
-        if (v[yy * w + xx] < best) { best = v[yy * w + xx]; bx = xx; by = yy; }
-      }
-    }
     const maxPx = (opts.maxMm || 15) * ppm;
-    for (const f of [0.35, 0.7, 1.1]) {
-      const m = segmentFromSeed(v, w, h, bx, by, Math.max(6, Math.round(maxPx * f)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: opts.minContrast || 0.03 });
-      if (m) return m;
+    // Search 1 mm round the point first, then wider up to `searchMm`, so the
+    // nearest spot wins over a darker fold or shadow further away.
+    const reach = opts.searchMm || 1;
+    for (const rmm of [1, 2, 3].filter((r) => r <= Math.max(1, reach))) {
+      const r = Math.max(2, Math.round(ppm * rmm));
+      let bx = Math.round(x), by = Math.round(y), best = 256;
+      for (let yy = Math.max(0, by - r); yy <= Math.min(h - 1, by + r); yy++) {
+        for (let xx = Math.max(0, bx - r); xx <= Math.min(w - 1, bx + r); xx++) {
+          if ((xx - x) ** 2 + (yy - y) ** 2 > r * r) continue;
+          if (v[yy * w + xx] < best) { best = v[yy * w + xx]; bx = xx; by = yy; }
+        }
+      }
+      for (const f of [0.35, 0.7, 1.1]) {
+        const m = segmentCompact(v, w, h, bx, by, Math.max(6, Math.round(maxPx * f)), { coreRadius: Math.max(1, Math.round(ppm * 0.3)), minContrast: opts.minContrast || 0.03 });
+        if (m) return m;
+      }
     }
     return null;
   }
@@ -653,12 +678,13 @@
   // Skin by colour, for photos the person finder cannot read. Keeps the
   // big skin regions and fills the holes moles leave in them. Returns null
   // when under `minShare` of the photo looks like skin.
-  function skinByColour(rgba, w, h, minShare) {
+  function skinByColour(rgba, w, h, minShare, minY) {
     const m = new Uint8Array(w * h);
     let n = 0;
     for (let k = 0, j = 0; k < w * h; k++, j += 4) {
       const r = rgba[j], g = rgba[j + 1], b = rgba[j + 2];
       const y = 0.299 * r + 0.587 * g + 0.114 * b;
+      if (minY && y < minY) continue;
       const cb = 128 - 0.1687 * r - 0.3313 * g + 0.5 * b;
       const cr = 128 + 0.5 * r - 0.4187 * g - 0.0813 * b;
       if (y > 45 && cr >= 133 && cr <= 180 && cb >= 77 && cb <= 135 && r > b) { m[k] = 1; n++; }
@@ -684,7 +710,7 @@
 
   const api = {
     brightness, boxMean, skinBackground, sampleBackground, dropForSensitivity,
-    segmentFromSeed, segmentAt, measureMask, convexHull, eqDiameter, detect,
+    segmentFromSeed, segmentCompact, segmentAt, measureMask, convexHull, eqDiameter, detect,
     fitTransform, applyTransform, invertTransform, matchMoles, alignByMoles,
     fillPolygon, scalePolygon, components, keepLarge, fillHoles, dilate, skinByColour, maskBounds,
   };
